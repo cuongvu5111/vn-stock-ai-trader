@@ -1,0 +1,76 @@
+# ============================================================
+# Ngày tạo: 2026-11-03
+# Mục đích: Cấu hình Docker Compose cho môi trường Local MVP
+# Gồm 3 services: postgres, trading-backend, trading-frontend
+# ============================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vn-stock-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trading_db}
+      POSTGRES_USER: ${POSTGRES_USER:-trader}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_local_only}
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init-schemas.sql:/docker-entrypoint-initdb.d/01-init-schemas.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-trader} -d $${POSTGRES_DB:-trading_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  trading-backend:
+    build:
+      context: .
+      dockerfile: src/backend/Dockerfile
+    container_name: vn-stock-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_NAME: ${APP_NAME:-Personal AI Trading Assistant}
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading_db}
+      POSTGRES_USER: ${POSTGRES_USER:-trader}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me_local_only}
+      INITIAL_PAPER_CAPITAL: ${INITIAL_PAPER_CAPITAL:-30000000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4200,http://127.0.0.1:4200}
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      AI_MODEL: ${AI_MODEL:-mock-v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      LLM_URL: ${LLM_URL:-https://api.openai.com/v1/chat/completions}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  trading-frontend:
+    build:
+      context: .
+      dockerfile: src/frontend/trading-dashboard/Dockerfile
+    container_name: vn-stock-frontend
+    restart: unless-stopped
+    depends_on:
+      trading-backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4200:80"
+
+volumes:
+  postgres_data:

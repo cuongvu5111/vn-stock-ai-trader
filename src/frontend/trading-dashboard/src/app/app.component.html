@@ -1,0 +1,935 @@
+<div class="safety-banner" [class.kill-active]="riskStatus?.kill_switch_active">
+  @if (riskStatus?.kill_switch_active) {
+    🛑 KILL SWITCH ĐANG BẬT (TRADING_ENABLED = FALSE) — TOÀN BỘ ĐỀ XUẤT VÀ LỆNH PAPER MỚI BỊ KHÓA KHẨN CẤP
+  } @else {
+    ⚠️ CHẾ ĐỘ AN TOÀN MVP: CHỈ HỖ TRỢ DỮ LIỆU LỊCH SỬ, BACKTEST & PAPER TRADING (VỐN GIẢ LẬP 30.000.000 VNĐ) — BẮT BUỘC PHÊ DUYỆT BỞI CON NGƯỜI
+  }
+</div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>VN Stock AI</h1>
+      <span class="badge">PAPER MVP v0.1</span>
+    </div>
+
+    <nav class="nav-menu" aria-label="Điều hướng 8 màn hình chính">
+      @for (tab of tabs; track tab.id) {
+        <button
+          type="button"
+          class="nav-item"
+          [class.active]="activeTab === tab.id"
+          (click)="selectTab(tab.id)"
+        >
+          {{ tab.label }}
+        </button>
+      }
+    </nav>
+
+    <div class="sidebar-footer">
+      <button type="button" class="btn btn-emerald w-full mb-1" [disabled]="isLoading" (click)="syncRealMarketAndRunPipeline()">
+        🌐 Đồng Bộ Giá Thật VN30 &amp; Chạy Pipeline
+      </button>
+      <button type="button" class="btn btn-primary w-full" [disabled]="isLoading" (click)="triggerDailyWorkflow()">
+        ⚡ Chạy Daily EOD Pipeline
+      </button>
+      <p class="hint mt-1">
+        Xóa dữ liệu [SAMPLE] → Tải giá thật (FPT, HPG, VCB, ACB, MBB, TCB, SSI, MWG...) → Tính Indicators → Quét Tín hiệu → AI Report
+      </p>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="top-bar">
+      <div>
+        <h2>{{ currentTabLabel }}</h2>
+        <p class="subtitle">Thị trường: HOSE / HNX / UPCOM • Phong cách: Daily / Swing EOD • Không Auto-Trading</p>
+      </div>
+      <div class="top-actions">
+        <div class="status-pill" [class.ok]="health?.status === 'healthy'">
+          Backend: {{ health?.status || 'checking...' }} | DB: {{ health?.database_status || '...' }}
+        </div>
+        <button
+          type="button"
+          class="btn"
+          [class.btn-danger]="!riskStatus?.kill_switch_active"
+          [class.btn-emerald]="riskStatus?.kill_switch_active"
+          (click)="toggleKillSwitchQuick()"
+        >
+          {{ riskStatus?.kill_switch_active ? 'Mở lại Giao dịch' : 'Bật Kill Switch' }}
+        </button>
+      </div>
+    </header>
+
+    @if (toastMessage) {
+      <div class="toast-banner" [class.toast-error]="toastType === 'error'" [class.toast-success]="toastType === 'success'">
+        <span>{{ toastMessage }}</span>
+        <button type="button" class="toast-close" (click)="toastMessage = ''">✕</button>
+      </div>
+    }
+
+    @if (isLoading) {
+      <div class="loading-bar">Đang xử lý yêu cầu từ Backend FastAPI...</div>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 1: OVERVIEW                                      -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'overview') {
+      <section class="grid-4 mb-2">
+        <div class="card">
+          <h3>Tổng NAV Danh Mục Paper</h3>
+          <p class="metric tabular-nums">{{ portfolio?.nav || '30000000.00' }} VND</p>
+          <span class="hint">[SIMULATED] Vốn gốc: {{ portfolio?.initial_capital || '30000000.00' }} VND</span>
+        </div>
+
+        <div class="card">
+          <h3>Tiền Mặt Khả Dụng (Cash)</h3>
+          <p class="metric tabular-nums">{{ portfolio?.cash_balance || '30000000.00' }} VND</p>
+          <span class="hint">Giá trị CP: {{ portfolio?.market_value || '0.00' }} VND ({{ portfolio?.allocation_pct || '0.00' }}%)</span>
+        </div>
+
+        <div class="card">
+          <h3>Lãi / Lỗ (Unrealized / Realized)</h3>
+          <p class="metric tabular-nums">
+            {{ portfolio?.unrealized_pnl || '0.00' }} / {{ portfolio?.realized_pnl || '0.00' }}
+          </p>
+          <span class="hint">Vị thế đang mở: {{ portfolio?.open_positions_count || 0 }} / {{ riskStatus?.configuration?.max_open_positions || 5 }}</span>
+        </div>
+
+        <div class="card">
+          <h3>Cổng Kiểm Soát Rủi Ro</h3>
+          <p class="metric tabular-nums">
+            {{ riskStatus?.kill_switch_active ? 'KHÓA (KILL SWITCH)' : 'ĐANG HOẠT ĐỘNG' }}
+          </p>
+          <span class="hint">
+            Max {{ riskStatus?.configuration?.max_risk_per_trade_percent || '1' }}% Risk/Lệnh •
+            Max {{ riskStatus?.configuration?.max_position_percent || '20' }}% / Mã
+          </span>
+        </div>
+      </section>
+
+      @if (lastWorkflowResult) {
+        <section class="card mb-2 highlight-card">
+          <h3>Kết quả Chạy Daily EOD Pipeline Gần Nhất ({{ lastWorkflowResult.as_of_date }})</h3>
+          <ul class="step-list">
+            @for (step of lastWorkflowResult.steps_summary; track step) {
+              <li>{{ step }}</li>
+            }
+          </ul>
+          <div class="row-actions mt-1">
+            <button type="button" class="btn btn-primary" (click)="selectTab('proposals')">
+              Sang Màn Hình 5. Trade Approval Để Duyệt Đề Xuất →
+            </button>
+          </div>
+        </section>
+      }
+
+      <div class="grid-2">
+        <section class="card">
+          <h3>Danh Sách Vị Thế Đang Nắm Giữ (Paper Positions)</h3>
+          @if (!portfolio || portfolio.positions.length === 0) {
+            <p class="empty-state">Chưa có vị thế cổ phiếu nào. Hãy chạy Daily Pipeline và duyệt Trade Proposal.</p>
+          } @else {
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Mã CK</th>
+                  <th>KL</th>
+                  <th>Giá vốn BQ</th>
+                  <th>Giá TT</th>
+                  <th>Giá trị TT</th>
+                  <th>Lãi/Lỗ Tạm Tính</th>
+                  <th>Tỷ trọng</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (pos of portfolio.positions; track pos.symbol) {
+                  <tr>
+                    <td><strong>{{ pos.symbol }}</strong></td>
+                    <td class="tabular-nums">{{ pos.quantity }}</td>
+                    <td class="tabular-nums">{{ pos.average_cost }}</td>
+                    <td class="tabular-nums">{{ pos.market_price }}</td>
+                    <td class="tabular-nums">{{ pos.market_value }}</td>
+                    <td class="tabular-nums">{{ pos.unrealized_pnl }}</td>
+                    <td class="tabular-nums">{{ pos.weight_pct }}%</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          }
+        </section>
+
+        <section class="card">
+          <h3>Tình Trạng Các Đợt Chạy Job Gần Nhất (system.job_runs)</h3>
+          @if (jobRuns.length === 0) {
+            <p class="empty-state">Chưa có lịch sử chạy Job. Nhấn "Chạy Daily EOD Pipeline" ở thanh bên trái để bắt đầu.</p>
+          } @else {
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Tên Job</th>
+                  <th>Trạng thái</th>
+                  <th>Bản ghi xử lý</th>
+                  <th>Hoàn tất lúc (UTC)</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (job of jobRuns; track job.id) {
+                  <tr>
+                    <td><strong>{{ job.job_name }}</strong></td>
+                    <td><span class="pill ok">{{ job.status }}</span></td>
+                    <td class="tabular-nums">{{ job.records_processed }}</td>
+                    <td class="tabular-nums">{{ job.completed_at }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          }
+        </section>
+      </div>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 2: MARKET DATA                                   -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'market') {
+      <section class="grid-4 mb-2">
+        <div class="card">
+          <h3>Tổng Số Mã Cổ Phiếu</h3>
+          <p class="metric tabular-nums">{{ marketOverview?.total_stocks || 0 }} ({{ marketOverview?.active_stocks || 0 }} active)</p>
+          <span class="hint">Nguồn dữ liệu: {{ marketOverview?.data_sources_count || 0 }} nguồn</span>
+        </div>
+        <div class="card">
+          <h3>Tổng Bản Ghi Giá OHLCV</h3>
+          <p class="metric tabular-nums">{{ marketOverview?.total_daily_price_records || 0 }}</p>
+          <span class="hint">Ngày cập nhật mới nhất: {{ marketOverview?.latest_trading_date || 'Chưa có' }}</span>
+        </div>
+        <div class="card span-2">
+          <h3>Thao Tác Dữ Liệu &amp; Chỉ Báo Kỹ Thuật</h3>
+          <div class="row-actions">
+            <button type="button" class="btn btn-emerald" (click)="syncRealMarketAndRunPipeline()">
+              🌐 Đồng Bộ Dữ Liệu Thật (10 Mã VN30/HOSE) &amp; Xóa [SAMPLE]
+            </button>
+            <button type="button" class="btn" (click)="recalculateIndicators()">
+              Tính Lại Toàn Bộ Indicators (MA/EMA/RSI/MACD/ATR)
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid-2 mb-2">
+        <section class="card">
+          <h3>Chọn Mã Cổ Phiếu & Biểu Đồ Giá + MA20 (SVG)</h3>
+          <div class="form-inline mb-1">
+            <label for="symSelect">Mã cổ phiếu:</label>
+            <select id="symSelect" [(ngModel)]="selectedSymbol" (change)="loadStockSeries(selectedSymbol)">
+              @for (st of stocks; track st.symbol) {
+                <option [value]="st.symbol">{{ st.symbol }} ({{ st.exchange }}) - {{ st.company_name }}</option>
+              }
+            </select>
+          </div>
+
+          @if (priceHistory.length < 2) {
+            <p class="empty-state">Chưa đủ dữ liệu lịch sử để vẽ biểu đồ. Hãy nhấn "Nạp Dữ Liệu Mẫu".</p>
+          } @else {
+            <div class="chart-box">
+              <svg viewBox="0 0 680 170" class="price-svg" role="img" aria-label="Biểu đồ giá đóng cửa và MA20">
+                <polyline
+                  fill="none"
+                  stroke="#3b82f6"
+                  stroke-width="2.2"
+                  [attr.points]="closeChartPolyline"
+                ></polyline>
+                @if (ma20ChartPolyline) {
+                  <polyline
+                    fill="none"
+                    stroke="#f59e0b"
+                    stroke-width="1.6"
+                    stroke-dasharray="4 3"
+                    [attr.points]="ma20ChartPolyline"
+                  ></polyline>
+                }
+              </svg>
+              <div class="chart-legend">
+                <span class="legend-close">── Giá đóng cửa ({{ selectedSymbol }})</span>
+                <span class="legend-ma20">- - Đường MA20</span>
+                <span class="hint">Nguồn: {{ priceHistory[priceHistory.length - 1]?.source_name }} ({{ priceHistory.length }} phiên)</span>
+              </div>
+            </div>
+          }
+        </section>
+
+        <section class="card">
+          <h3>Import Dữ Liệu CSV Thủ Công (Idempotent Validation)</h3>
+          <div class="form-group">
+            <label for="csvFile">Tên tệp ghi nhận Batch:</label>
+            <input id="csvFile" type="text" [(ngModel)]="csvFileName" placeholder="upload.csv" />
+          </div>
+          <div class="form-group">
+            <label for="csvText">Nội dung CSV (`symbol,trading_date,open,high,low,close,volume,exchange,data_label`):</label>
+            <textarea
+              id="csvText"
+              rows="4"
+              [(ngModel)]="csvImportContent"
+              placeholder="HPG,2026-05-18,22300,22600,22100,22500,2800000,HOSE,SAMPLE"
+            ></textarea>
+          </div>
+          <button type="button" class="btn btn-primary" (click)="submitCsvImport()">
+            Kiểm Tra & Import CSV
+          </button>
+        </section>
+      </div>
+
+      <section class="card">
+        <h3>Bảng Lịch Sử Giá OHLCV & Chỉ Báo Kỹ Thuật ({{ selectedSymbol }})</h3>
+        @if (priceHistory.length === 0) {
+          <p class="empty-state">Chưa có bản ghi OHLCV cho mã này.</p>
+        } @else {
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Ngày GD</th>
+                  <th>Open</th>
+                  <th>High</th>
+                  <th>Low</th>
+                  <th>Close</th>
+                  <th>Volume</th>
+                  <th>Nguồn</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (row of priceHistory.slice(-15).reverse(); track row.id) {
+                  <tr>
+                    <td class="tabular-nums">{{ row.trading_date }}</td>
+                    <td class="tabular-nums">{{ row.open }}</td>
+                    <td class="tabular-nums">{{ row.high }}</td>
+                    <td class="tabular-nums">{{ row.low }}</td>
+                    <td class="tabular-nums"><strong>{{ row.close }}</strong></td>
+                    <td class="tabular-nums">{{ row.volume }}</td>
+                    <td><span class="pill">{{ row.source_name }}</span></td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        }
+      </section>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 3: STOCK SCANNER & BACKTEST                      -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'scanner') {
+      <div class="grid-2 mb-2">
+        <section class="card">
+          <h3>Bộ Lọc Quét Cổ Phiếu (Stock Scanner EOD)</h3>
+          <div class="form-inline mb-1">
+            <label for="stratSelect">Chiến lược:</label>
+            <select id="stratSelect" [(ngModel)]="scannerStrategyType">
+              <option value="TREND_FOLLOWING">Trend Following (Close &gt; MA20 &gt; MA50, RSI 50-70, Vol &gt; 1.2x)</option>
+              <option value="PULLBACK">Pullback (Xu hướng tăng trung hạn, điều chỉnh về MA20, RSI hồi phục)</option>
+            </select>
+          </div>
+          <div class="form-inline mb-1">
+            <label>
+              <input type="checkbox" [(ngModel)]="onlyActionableSignals" />
+              Chỉ hiển thị tín hiệu hành động (BUY / SELL)
+            </label>
+          </div>
+          <button type="button" class="btn btn-primary" (click)="runStockScanner()">
+            🔍 Chạy Stock Scanner Ngay
+          </button>
+        </section>
+
+        <section class="card">
+          <h3>Mô Phỏng Lịch Sử (Backtest Engine — Khớp T+1 Open, Không Look-Ahead)</h3>
+          <div class="form-row">
+            <div>
+              <label for="btSym">Mã CK:</label>
+              <input id="btSym" type="text" [(ngModel)]="backtestSymbol" />
+            </div>
+            <div>
+              <label for="btStart">Từ ngày:</label>
+              <input id="btStart" type="text" [(ngModel)]="backtestStartDate" />
+            </div>
+            <div>
+              <label for="btEnd">Đến ngày:</label>
+              <input id="btEnd" type="text" [(ngModel)]="backtestEndDate" />
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary mt-1" (click)="runBacktestSimulation()">
+            📊 Chạy Backtest Chiến Lược
+          </button>
+
+          @if (backtestResult) {
+            <div class="bt-summary mt-1">
+              <p class="tabular-nums">
+                <strong>{{ backtestResult.symbol }} ({{ backtestResult.strategy_type }}):</strong>
+                Return = {{ backtestResult.metrics['total_return_pct'] }}% |
+                MaxDD = {{ backtestResult.metrics['max_drawdown_pct'] }}% |
+                WinRate = {{ backtestResult.metrics['win_rate_pct'] }}% |
+                Số lệnh = {{ backtestResult.metrics['number_of_trades'] }} |
+                Benchmark B&amp;H = {{ backtestResult.metrics['benchmark_buy_and_hold_return_pct'] }}%
+              </p>
+            </div>
+          }
+        </section>
+      </div>
+
+      <section class="card">
+        <h3>Danh Sách Tín Hiệu Đã Quét (analysis.stock_signals)</h3>
+        @if (signals.length === 0) {
+          <p class="empty-state">Chưa có tín hiệu nào. Hãy nhấn "Chạy Stock Scanner Ngay" hoặc "Chạy Daily EOD Pipeline".</p>
+        } @else {
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Mã CK</th>
+                <th>Ngày Tín Hiệu</th>
+                <th>Hành Động</th>
+                <th>Điểm Nội Bộ</th>
+                <th>Giá Tham Chiếu</th>
+                <th>Stop Loss</th>
+                <th>Lý Do &amp; Cảnh Báo</th>
+                <th>Thao Tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (sig of signals; track sig.id) {
+                <tr>
+                  <td><strong>{{ sig.symbol }}</strong></td>
+                  <td class="tabular-nums">{{ sig.signal_date }}</td>
+                  <td>
+                    <span
+                      class="pill"
+                      [class.ok]="sig.action === 'BUY'"
+                      [class.danger]="sig.action === 'SELL'"
+                    >
+                      {{ sig.action }}
+                    </span>
+                  </td>
+                  <td class="tabular-nums">{{ sig.score }}</td>
+                  <td class="tabular-nums">{{ sig.reference_price }}</td>
+                  <td class="tabular-nums">{{ sig.stop_loss || '—' }}</td>
+                  <td>
+                    <ul class="compact-list">
+                      @for (r of sig.reason; track r) {
+                        <li>{{ r }}</li>
+                      }
+                      @for (w of sig.warnings; track w) {
+                        <li class="warn-text">⚠️ {{ w }}</li>
+                      }
+                    </ul>
+                  </td>
+                  <td>
+                    <div class="row-actions">
+                      <button type="button" class="btn btn-sm" (click)="inspectSignal(sig)">
+                        Chi Tiết &amp; AI
+                      </button>
+                      @if (sig.action === 'BUY' || sig.action === 'SELL') {
+                        <button type="button" class="btn btn-sm btn-primary" (click)="createProposalFromSignal(sig)">
+                          Tạo Proposal
+                        </button>
+                      }
+                    </div>
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        }
+      </section>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 4: SIGNAL DETAIL & AI REPORT                     -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'signals') {
+      <div class="grid-2">
+        <section class="card">
+          <h3>Chi Tiết Tín Hiệu &amp; Đánh Giá Rủi Ro</h3>
+          @if (!selectedSignal) {
+            <p class="empty-state">Hãy chọn một tín hiệu từ màn hình Stock Scanner để xem chi tiết.</p>
+          } @else {
+            <div class="detail-kv">
+              <p><strong>Mã cổ phiếu:</strong> {{ selectedSignal.symbol }}</p>
+              <p><strong>Ngày tín hiệu (`signal_date`):</strong> <span class="tabular-nums">{{ selectedSignal.signal_date }}</span></p>
+              <p><strong>Hành động:</strong> <span class="pill ok">{{ selectedSignal.action }}</span></p>
+              <p><strong>Điểm nội bộ (`score` - không phải xác suất):</strong> <span class="tabular-nums">{{ selectedSignal.score }}</span></p>
+              <p><strong>Giá tham chiếu (`reference_price`):</strong> <span class="tabular-nums">{{ selectedSignal.reference_price }} VND</span></p>
+              <p><strong>Mức cắt lỗ bắt buộc (`stop_loss`):</strong> <span class="tabular-nums">{{ selectedSignal.stop_loss || 'N/A' }} VND</span></p>
+              <p><strong>Phiên bản nguồn dữ liệu:</strong> <code>{{ selectedSignal.source_data_version }}</code></p>
+            </div>
+
+            <h4 class="mt-1">Lý do kỹ thuật:</h4>
+            <ul class="step-list">
+              @for (item of selectedSignal.reason; track item) {
+                <li>{{ item }}</li>
+              }
+            </ul>
+
+            <div class="row-actions mt-1">
+              <button type="button" class="btn btn-primary" (click)="generateAiReportForSelectedSignal()">
+                🤖 Sinh Báo Cáo Giải Thích AI (Có Trích Dẫn Nguồn)
+              </button>
+              @if (selectedSignal.action === 'BUY' || selectedSignal.action === 'SELL') {
+                <button type="button" class="btn btn-emerald" (click)="createProposalFromSignal(selectedSignal)">
+                  ➕ Tạo Trade Proposal Chờ Duyệt
+                </button>
+              }
+            </div>
+          }
+        </section>
+
+        <section class="card">
+          <h3>Báo Cáo Giải Thích AI (Cô Lập Với Đặt Lệnh — Explainable AI)</h3>
+          @if (!currentAiReport || !currentAiReport.report) {
+            <p class="empty-state">
+              Chưa có báo cáo AI cho tín hiệu đang chọn. Nhấn "Sinh Báo Cáo Giải Thích AI" để tạo bản tổng hợp có kiểm chứng nguồn.
+            </p>
+          } @else {
+            <div class="ai-box">
+              <p class="hint">
+                Provider: <strong>{{ currentAiReport.provider }}</strong> •
+                Model: <strong>{{ currentAiReport.model }}</strong> •
+                Prompt: <code>{{ currentAiReport.prompt_version }}</code> •
+                Trạng thái: <span class="pill ok">{{ currentAiReport.status }}</span>
+              </p>
+
+              <h4 class="mt-1">Tóm tắt tổng hợp (Summary):</h4>
+              <p>{{ currentAiReport.report.summary }}</p>
+
+              <h4 class="mt-1">Yếu tố tích cực &amp; Bằng chứng kỹ thuật:</h4>
+              <ul class="step-list">
+                @for (pf of currentAiReport.report.positive_factors; track pf) {
+                  <li>✅ {{ pf }}</li>
+                }
+                @for (nf of currentAiReport.report.negative_factors; track nf) {
+                  <li>🔻 {{ nf }}</li>
+                }
+              </ul>
+
+              <h4 class="mt-1">Rủi ro &amp; Bằng chứng trái chiều:</h4>
+              <ul class="step-list">
+                @for (rk of currentAiReport.report.risks; track rk) {
+                  <li class="warn-text">⚠️ {{ rk }}</li>
+                }
+                @for (cf of currentAiReport.report.conflicting_evidence; track cf) {
+                  <li>🔄 {{ cf }}</li>
+                }
+              </ul>
+
+              <h4 class="mt-1">Giới hạn dữ liệu (Limitations) &amp; Nguồn trích dẫn:</h4>
+              <ul class="step-list">
+                @for (lim of currentAiReport.report.limitations; track lim) {
+                  <li class="hint">ℹ️ {{ lim }}</li>
+                }
+                @for (src of currentAiReport.report.source_references; track src.source_id) {
+                  <li>📚 <code>{{ src.source_id }}</code> ({{ src.source_type }}): {{ src.description }} ({{ src.as_of_date }})</li>
+                }
+              </ul>
+            </div>
+          }
+        </section>
+      </div>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 5: TRADE APPROVAL (HUMAN-IN-THE-LOOP)            -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'proposals') {
+      <section class="card mb-2">
+        <h3>Thông Tin Xác Nhận Phê Duyệt Bởi Con Người (Human Approval Gate)</h3>
+        <p class="hint mb-1">
+          Mọi quyết định Approve sẽ được Backend kiểm tra khớp Snapshot (Quantity, Limit Price, Stop Loss),
+          Re-validate toàn bộ hạn mức rủi ro &amp; Kill Switch ngay tại thời điểm duyệt trước khi gửi sang Paper Broker.
+        </p>
+        <div class="form-row">
+          <div>
+            <label for="appBy">Người phê duyệt (`approved_by`):</label>
+            <input id="appBy" type="text" [(ngModel)]="approverName" placeholder="trader_cuong" />
+          </div>
+          <div class="span-2">
+            <label for="appCmt">Ghi chú phê duyệt / từ chối (`comment`):</label>
+            <input id="appCmt" type="text" [(ngModel)]="approvalComment" />
+          </div>
+          <div>
+            <label class="checkbox-label">
+              <input type="checkbox" [(ngModel)]="autoFillOnApprove" />
+              Khớp ngay trên Paper Broker sau khi duyệt
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Danh Sách Đề Xuất Giao Dịch (trading.trade_proposals)</h3>
+        @if (proposals.length === 0) {
+          <p class="empty-state">
+            Chưa có đề xuất giao dịch nào. Hãy chạy "Daily EOD Pipeline" hoặc bấm "Tạo Proposal" từ màn hình Scanner.
+          </p>
+        } @else {
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Mã CK</th>
+                <th>Chiều</th>
+                <th>KL Đề Xuất (Lô 100)</th>
+                <th>Giá Đặt (Limit)</th>
+                <th>Stop Loss</th>
+                <th>Chi Phí Ước Tính (Có Phí)</th>
+                <th>Rủi Ro Tối Đa (1% NAV)</th>
+                <th>Hết Hạn Lúc (UTC)</th>
+                <th>Trạng Thái</th>
+                <th>Quyết Định Của Người Dùng</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (prop of proposals; track prop.id) {
+                <tr>
+                  <td><strong>{{ prop.symbol }}</strong></td>
+                  <td>
+                    <span class="pill" [class.ok]="prop.side === 'BUY'" [class.danger]="prop.side === 'SELL'">
+                      {{ prop.side }}
+                    </span>
+                  </td>
+                  <td class="tabular-nums"><strong>{{ prop.proposed_quantity }}</strong></td>
+                  <td class="tabular-nums">{{ prop.limit_price }}</td>
+                  <td class="tabular-nums">{{ prop.stop_loss || '—' }}</td>
+                  <td class="tabular-nums">{{ prop.estimated_cost }} VND</td>
+                  <td class="tabular-nums">{{ prop.risk_amount }} VND</td>
+                  <td class="tabular-nums">
+                    {{ prop.expires_at }}
+                    @if (prop.status === 'PendingApproval' && isProposalExpired(prop)) {
+                      <span class="warn-text"> (Đã quá hạn!)</span>
+                    }
+                  </td>
+                  <td>
+                    <span
+                      class="pill"
+                      [class.ok]="prop.status === 'Submitted'"
+                      [class.danger]="prop.status === 'Blocked' || prop.status === 'Rejected' || prop.status === 'Expired'"
+                    >
+                      {{ prop.status }}
+                    </span>
+                  </td>
+                  <td>
+                    @if (prop.status === 'PendingApproval') {
+                      <div class="row-actions">
+                        <button
+                          type="button"
+                          class="btn btn-sm btn-emerald"
+                          [disabled]="isLoading"
+                          (click)="approveProposalItem(prop)"
+                        >
+                          ✓ Approve
+                        </button>
+                        <button
+                          type="button"
+                          class="btn btn-sm btn-danger"
+                          [disabled]="isLoading"
+                          (click)="rejectProposalItem(prop)"
+                        >
+                          ✕ Reject
+                        </button>
+                      </div>
+                    } @else if (prop.order_id) {
+                      <button type="button" class="btn btn-sm" (click)="selectTab('orders')">
+                        Xem Order →
+                      </button>
+                    } @else {
+                      <span class="hint">Đã đóng ({{ prop.status }})</span>
+                    }
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        }
+      </section>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 6: PAPER ORDERS & SIMULATED FILLS                -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'orders') {
+      <section class="card">
+        <h3>Danh Sách Lệnh Giao Dịch Giả Lập (trading.orders &amp; trading.executions)</h3>
+        @if (orders.length === 0) {
+          <p class="empty-state">Chưa có lệnh Paper nào. Lệnh chỉ được tạo sau khi bạn nhấn Approve một TradeProposal.</p>
+        } @else {
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Mã Lệnh Broker</th>
+                <th>Mã CK</th>
+                <th>Chiều</th>
+                <th>KL Đặt / Đã Khớp</th>
+                <th>Giá Đặt / Giá Khớp BQ</th>
+                <th>Trạng Thái</th>
+                <th>Lịch Sử Khớp (Executions)</th>
+                <th>Mô Phỏng Khớp Lệnh (Paper Fill / Partial Fill)</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (ord of orders; track ord.id) {
+                <tr>
+                  <td class="tabular-nums">
+                    <strong>{{ ord.broker_order_id }}</strong>
+                    <div class="hint">{{ ord.client_order_id }}</div>
+                  </td>
+                  <td><strong>{{ ord.symbol }}</strong></td>
+                  <td><span class="pill ok">{{ ord.side }}</span></td>
+                  <td class="tabular-nums">{{ ord.filled_quantity }} / {{ ord.quantity }}</td>
+                  <td class="tabular-nums">{{ ord.limit_price }} / {{ ord.average_fill_price || '—' }}</td>
+                  <td>
+                    <span
+                      class="pill"
+                      [class.ok]="ord.status === 'Filled'"
+                      [class.danger]="ord.status === 'Cancelled'"
+                    >
+                      {{ ord.status }}
+                    </span>
+                  </td>
+                  <td>
+                    @if (ord.executions.length === 0) {
+                      <span class="hint">Chưa có lần khớp nào</span>
+                    } @else {
+                      <ul class="compact-list tabular-nums">
+                        @for (ex of ord.executions; track ex.id) {
+                          <li>
+                            {{ ex.quantity }} cp &#64; {{ ex.price }} (Phí: {{ ex.fee }}, Thuế: {{ ex.tax }})
+                          </li>
+                        }
+                      </ul>
+                    }
+                  </td>
+                  <td>
+                    @if (ord.status === 'Submitted' || ord.status === 'PartiallyFilled') {
+                      <div class="fill-controls">
+                        <input
+                          type="number"
+                          step="100"
+                          min="100"
+                          class="input-sm"
+                          [(ngModel)]="fillQuantityMap[ord.id]"
+                          aria-label="Khối lượng khớp"
+                        />
+                        <input
+                          type="text"
+                          class="input-sm"
+                          [(ngModel)]="fillPriceMap[ord.id]"
+                          aria-label="Giá khớp"
+                        />
+                        <button type="button" class="btn btn-sm btn-emerald" (click)="simulateFill(ord)">
+                          Khớp Lệnh
+                        </button>
+                        <button type="button" class="btn btn-sm btn-danger" (click)="cancelPaperOrder(ord)">
+                          Hủy
+                        </button>
+                      </div>
+                    } @else {
+                      <span class="hint">Đã hoàn tất ({{ ord.status }})</span>
+                    }
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        }
+      </section>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 7: PORTFOLIO, DAILY SNAPSHOTS & CASH LEDGER      -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'portfolio') {
+      <section class="card mb-2">
+        <div class="row-between">
+          <div>
+            <h3>Đối Soát &amp; Tái Dựng Danh Mục Từ Sổ Cái Gốc (Accounting Truth Rule)</h3>
+            <p class="hint">
+              Nguồn sự thật duy nhất là `portfolio.cash_transactions` và `trading.executions`. Bạn có thể chạy đối soát bất cứ lúc nào.
+            </p>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="btn" (click)="takeDailySnapshot()">
+              📸 Chốt NAV Cuối Ngày (Daily Snapshot)
+            </button>
+            <button type="button" class="btn btn-primary" (click)="runPortfolioReconciliation()">
+              🔄 Đối Soát &amp; Rebuild Từ Sổ Cái (Reconcile)
+            </button>
+          </div>
+        </div>
+
+        @if (lastReconcileReport) {
+          <div class="bt-summary mt-1">
+            <p class="tabular-nums">
+              <strong>Kết quả đối soát lúc {{ lastReconcileReport.reconciled_at }}:</strong>
+              Nhất quán trước khi rebuild:
+              <span class="pill" [class.ok]="lastReconcileReport.is_consistent_before_rebuild">
+                {{ lastReconcileReport.is_consistent_before_rebuild ? 'KHỚP 100%' : 'ĐÃ KHÔI PHỤC SAI LỆCH' }}
+              </span>
+              • Tiền mặt chuẩn: {{ lastReconcileReport.rebuilt_cash_balance }} VND •
+              Số vị thế tái dựng: {{ lastReconcileReport.positions_rebuilt_count }}
+            </p>
+          </div>
+        }
+      </section>
+
+      <div class="grid-2">
+        <section class="card">
+          <h3>Sổ Cái Biến Động Tiền Mặt (portfolio.cash_transactions)</h3>
+          @if (cashLedger.length === 0) {
+            <p class="empty-state">Chưa có bút toán tiền mặt nào.</p>
+          } @else {
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Thời gian (UTC)</th>
+                  <th>Loại bút toán</th>
+                  <th>Số tiền (VND)</th>
+                  <th>Diễn giải</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (tx of cashLedger; track tx.id) {
+                  <tr>
+                    <td class="tabular-nums">{{ tx.created_at }}</td>
+                    <td><span class="pill">{{ tx.transaction_type }}</span></td>
+                    <td class="tabular-nums"><strong>{{ tx.amount }}</strong></td>
+                    <td>{{ tx.description }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          }
+        </section>
+
+        <section class="card">
+          <h3>Lịch Sử Chốt NAV Cuối Ngày (portfolio.daily_snapshots)</h3>
+          @if (snapshots.length === 0) {
+            <p class="empty-state">Chưa có bản chụp NAV cuối ngày nào.</p>
+          } @else {
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Ngày</th>
+                  <th>Tiền mặt</th>
+                  <th>Giá trị CP</th>
+                  <th>Tổng NAV</th>
+                  <th>Unrealized P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (sn of snapshots; track sn.id) {
+                  <tr>
+                    <td class="tabular-nums">{{ sn.snapshot_date }}</td>
+                    <td class="tabular-nums">{{ sn.cash_balance }}</td>
+                    <td class="tabular-nums">{{ sn.market_value }}</td>
+                    <td class="tabular-nums"><strong>{{ sn.nav }}</strong></td>
+                    <td class="tabular-nums">{{ sn.unrealized_pnl }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          }
+        </section>
+      </div>
+    }
+
+    <!-- ========================================================= -->
+    <!-- MÀN HÌNH 8: RISK SETTINGS, KILL SWITCH & AUDIT LOGS       -->
+    <!-- ========================================================= -->
+    @if (activeTab === 'risk') {
+      <div class="grid-2">
+        <section class="card">
+          <h3>Cấu Hình Hạn Mức Rủi Ro &amp; Kill Switch (system.risk_configs)</h3>
+          <div class="form-row mb-1">
+            <div>
+              <label for="maxPos">Tỷ trọng tối đa / 1 mã (% NAV):</label>
+              <input id="maxPos" type="text" [(ngModel)]="editableRiskConfig.max_position_percent" />
+            </div>
+            <div>
+              <label for="maxRisk">Rủi ro tối đa / 1 lệnh (% NAV):</label>
+              <input id="maxRisk" type="text" [(ngModel)]="editableRiskConfig.max_risk_per_trade_percent" />
+            </div>
+          </div>
+
+          <div class="form-row mb-1">
+            <div>
+              <label for="maxDailyLoss">Giới hạn lỗ tối đa trong ngày (% NAV):</label>
+              <input id="maxDailyLoss" type="text" [(ngModel)]="editableRiskConfig.max_daily_loss_percent" />
+            </div>
+            <div>
+              <label for="maxAlloc">Tỷ trọng cổ phiếu tối đa toàn danh mục (%):</label>
+              <input id="maxAlloc" type="text" [(ngModel)]="editableRiskConfig.max_portfolio_allocation_percent" />
+            </div>
+          </div>
+
+          <div class="form-row mb-1">
+            <div>
+              <label for="maxOpenPos">Số vị thế mở tối đa:</label>
+              <input id="maxOpenPos" type="number" [(ngModel)]="editableRiskConfig.max_open_positions" />
+            </div>
+            <div>
+              <label class="checkbox-label">
+                <input type="checkbox" [(ngModel)]="editableRiskConfig.trading_enabled" />
+                Cho phép giao dịch (`trading_enabled` - Bỏ chọn = BẬT KILL SWITCH)
+              </label>
+            </div>
+          </div>
+
+          <div class="form-row mb-1">
+            <div>
+              <label for="rkActor">Người thực hiện (`actor`):</label>
+              <input id="rkActor" type="text" [(ngModel)]="riskUpdateActor" />
+            </div>
+            <div class="span-2">
+              <label for="rkReason">Lý do thay đổi (Bắt buộc ghi vào Audit Log):</label>
+              <input id="rkReason" type="text" [(ngModel)]="riskUpdateReason" />
+            </div>
+          </div>
+
+          <button type="button" class="btn btn-primary" (click)="saveRiskConfiguration()">
+            💾 Lưu Cấu Hình Rủi Ro &amp; Ghi Audit Log
+          </button>
+        </section>
+
+        <section class="card">
+          <h3>Nhật Ký Kiểm Toán Bất Biến (system.audit_logs)</h3>
+          @if (!riskStatus || riskStatus.recent_audit_logs.length === 0) {
+            <p class="empty-state">Chưa có bản ghi kiểm toán nào.</p>
+          } @else {
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Thời gian (UTC)</th>
+                    <th>Người thực hiện</th>
+                    <th>Hành động</th>
+                    <th>Đối tượng</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (log of riskStatus.recent_audit_logs; track log.id) {
+                    <tr>
+                      <td class="tabular-nums">#{{ log.id }}</td>
+                      <td class="tabular-nums">{{ log.created_at }}</td>
+                      <td><strong>{{ log.actor }}</strong></td>
+                      <td><code>{{ log.action }}</code></td>
+                      <td class="tabular-nums">{{ log.entity_type }} ({{ log.entity_id }})</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          }
+        </section>
+      </div>
+    }
+  </main>
+</div>
