@@ -1,6 +1,7 @@
 # Ngày tạo: 2026-11-03
 # Mục đích: Tập hợp toàn bộ SQLAlchemy 2.0 models từ 6 schemas để Alembic tự động nhận diện.
 
+from app.auth.models import User
 from app.core.database import POSTGRES_SCHEMAS, Base
 from app.indicators.models import AiReport, AnalysisRun, StockSignal, TechnicalIndicator
 from app.market_data.models import DailyPrice, DataSource, ImportBatch, Stock
@@ -12,6 +13,7 @@ from app.trading.models import Approval, Execution, Order, TradeProposal
 __all__ = [
     "POSTGRES_SCHEMAS",
     "Base",
+    "User",
     "Stock",
     "DataSource",
     "ImportBatch",

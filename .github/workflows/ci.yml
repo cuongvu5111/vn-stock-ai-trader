@@ -1,0 +1,202 @@
+# Ngày tạo: 2026-11-17
+# Mục đích: CI kiểm tra backend (ruff + pytest trên PostgreSQL thật, migration), frontend (lint/test/build) và
+#   cấu hình Docker Compose LAN (config, build, smoke test). KHÔNG deploy, KHÔNG dùng secret thật.
+# Lưu ý: mọi giá trị "ci-..." bên dưới là secret CHỈ DÙNG CHO CI, sống trong runner tạm thời; không trùng với bất kỳ môi trường thật nào.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (ruff + pytest + migrations)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: src/backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci0pg0Zk7Qw3Lm9Xt5Rv2
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      APP_ENV: test
+      LOG_LEVEL: WARNING
+      # Đủ mạnh để qua kiểm tra cấu hình (>= 32 ký tự, không chứa chuỗi placeholder); chỉ dùng trong CI.
+      JWT_SECRET_KEY: ci-Jk8Wq3Zr6Vt1Mn4Xb7Hd2Ps9Lc5Ye0Ag3Fu8Ro
+      SCHEDULER_ENABLED: "false"
+      # Bật các test PostgreSQL thật (migration 0003/0004/0005, khớp/hủy lệnh đồng thời, khóa dòng). Mỗi test tự tạo/xóa database tạm
+      # nên cần user có quyền CREATE DATABASE (superuser `postgres` của service container).
+      MIGRATION_TEST_POSTGRES_URL: postgresql+psycopg://postgres:ci0pg0Zk7Qw3Lm9Xt5Rv2@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: src/backend/requirements.txt
+
+      - name: Cài dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Alembic upgrade + seed idempotent trên PostgreSQL
+        env:
+          PGPASSWORD: ci0pg0Zk7Qw3Lm9Xt5Rv2
+          DATABASE_URL_OVERRIDE: postgresql+psycopg://postgres:ci0pg0Zk7Qw3Lm9Xt5Rv2@127.0.0.1:5432/trading_ci
+          BOOTSTRAP_ADMIN_USERNAME: ci_admin
+          BOOTSTRAP_ADMIN_PASSWORD: ci-Admin-Pw-Zq7Lm3Xt9Rv
+        run: |
+          psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE trading_ci"
+          alembic upgrade head
+          alembic current
+          python ../../database/seeds/seed_initial.py
+          python ../../database/seeds/seed_initial.py
+
+      - name: Pytest (gồm test PostgreSQL thật)
+        shell: bash
+        run: |
+          pytest -q -rs 2>&1 | tee pytest.log
+          # CI không được phép skip: skip nghĩa là test PostgreSQL thật không chạy (thiếu MIGRATION_TEST_POSTGRES_URL).
+          if grep -Eq '[0-9]+ skipped' pytest.log; then
+            echo "::error::Có test bị skip - kiểm tra MIGRATION_TEST_POSTGRES_URL"
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend (lint + test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: src/frontend/trading-dashboard
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/frontend/trading-dashboard/package-lock.json
+
+      - name: Cài dependencies (đúng theo package-lock.json)
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit test (Karma, ChromeHeadless, không watch)
+        run: npm test
+
+      - name: Build production
+        run: npm run build
+
+      - name: index.html không chứa script/handler inline (tương thích CSP script-src 'self')
+        run: |
+          html=dist/trading-dashboard/browser/index.html
+          if grep -Eiq '[[:space:]]on[a-z]+[[:space:]]*=' "$html"; then
+            echo "::error::index.html chứa thuộc tính sự kiện inline (vi phạm CSP script-src 'self')"
+            exit 1
+          fi
+          if grep -Eio '<script[^>]*>' "$html" | grep -viq 'src='; then
+            echo "::error::index.html chứa <script> inline (vi phạm CSP script-src 'self')"
+            exit 1
+          fi
+
+  docker:
+    name: Docker Compose (config + build + smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Secret thử nghiệm cho compose; FRONTEND_PORT khác mặc định để tránh xung đột cổng trên runner.
+      DB_PASSWORD: ci0pg0Zk7Qw3Lm9Xt5Rv2
+      JWT_SECRET_KEY: ci-Jk8Wq3Zr6Vt1Mn4Xb7Hd2Ps9Lc5Ye0Ag3Fu8Ro
+      BOOTSTRAP_ADMIN_USERNAME: ci_admin
+      BOOTSTRAP_ADMIN_PASSWORD: ci-Admin-Pw-Zq7Lm3Xt9Rv
+      FRONTEND_PORT: "4200"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: docker compose config (mặc định và profile backup)
+        run: |
+          docker compose config --quiet
+          docker compose --profile backup config --quiet
+
+      - name: Thiếu secret bắt buộc phải làm compose dừng ngay (fail-fast)
+        run: |
+          for missing in DB_PASSWORD JWT_SECRET_KEY BOOTSTRAP_ADMIN_PASSWORD; do
+            if env -u "$missing" docker compose config --quiet 2> compose-error.log; then
+              echo "::error::compose không báo lỗi khi thiếu $missing"
+              exit 1
+            fi
+            grep -q "required variable $missing is missing a value" compose-error.log
+          done
+          rm -f compose-error.log
+
+      - name: Chỉ frontend được phép bind LAN; postgres/backend chỉ loopback
+        run: |
+          docker compose --profile backup config --format json > compose.json
+          # Mặc định: mọi cổng publish đều là 127.0.0.1.
+          jq -e '[.services[].ports[]? | .host_ip] | all(. == "127.0.0.1")' compose.json
+          # Đặt FRONTEND_BIND_ADDRESS: chỉ cổng 8080 của frontend đổi, các cổng khác vẫn loopback.
+          FRONTEND_BIND_ADDRESS=192.168.1.10 docker compose config --format json > compose-lan.json
+          jq -e '.services["trading-frontend"].ports[0].host_ip == "192.168.1.10"' compose-lan.json
+          jq -e '[.services | to_entries[] | select(.key != "trading-frontend") | .value.ports[]? | .host_ip] | all(. == "127.0.0.1")' compose-lan.json
+          rm -f compose.json compose-lan.json
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Khởi động stack và chờ healthcheck
+        run: docker compose up -d --wait --wait-timeout 240
+
+      - name: Smoke test qua nginx (health, header bảo mật, đăng nhập)
+        run: |
+          curl -fsS http://127.0.0.1:4200/health
+          curl -fsS http://127.0.0.1:4200/api/v1/health | jq -e '.status == "healthy" and .live_broker_enabled == false'
+          headers="$(curl -fsSI http://127.0.0.1:4200/)"
+          echo "$headers"
+          echo "$headers" | grep -qi '^content-security-policy:'
+          echo "$headers" | grep -qi '^x-content-type-options: nosniff'
+          echo "$headers" | grep -qi '^cache-control: no-cache'
+          if echo "$headers" | grep -Eiq '^server: nginx/'; then
+            echo "::error::server_tokens chưa tắt"
+            exit 1
+          fi
+          payload="$(jq -n --arg u "$BOOTSTRAP_ADMIN_USERNAME" --arg p "$BOOTSTRAP_ADMIN_PASSWORD" '{username: $u, password: $p}')"
+          curl -fsS -X POST http://127.0.0.1:4200/api/v1/auth/login -H 'Content-Type: application/json' -d "$payload" | jq -e '.access_token | length > 20' > /dev/null
+          # Swagger tắt ở APP_ENV=production: backend trả 404 cho /docs (kiểm tra trực tiếp qua cổng loopback).
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/docs)" = "404"
+          # Host lạ bị TrustedHostMiddleware từ chối.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' http://127.0.0.1:8000/api/v1/health)" = "400"
+
+      - name: Log container khi lỗi
+        if: failure()
+        run: docker compose --profile backup logs --no-color --tail 200
+
+      - name: Dọn dẹp
+        if: always()
+        run: docker compose --profile backup down -v --remove-orphans

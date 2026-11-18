@@ -8,6 +8,9 @@ psycopg[binary]==3.2.3
 structlog==24.4.0
 apscheduler==3.11.0
 httpx==0.28.1
+PyJWT==2.10.1
+argon2-cffi==23.1.0
+tzdata>=2024.2
 pytest==8.3.4
 pytest-cov==6.0.0
 ruff==0.8.4

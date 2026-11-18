@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core import clock
 from app.indicators.models import StockSignal
 from app.market_data.models import Stock
 from app.portfolio.service import PortfolioService
@@ -36,6 +37,16 @@ def _ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _require_actor(actor: Optional[str]) -> str:
+    """Actor phê duyệt/từ chối luôn do API điền từ JWT; thiếu actor nghĩa là gọi service sai cách nên chặn."""
+    if not actor:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Thiếu định danh người thực hiện (actor) từ phiên đăng nhập.",
+        )
+    return actor
 
 
 class TradingWorkflowService:
@@ -165,7 +176,7 @@ class TradingWorkflowService:
                 detail=f"Risk Engine từ chối tạo Proposal: {'; '.join(risk_eval.reasons)}",
             )
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = clock.utc_now()
         expires_at = now_utc + timedelta(minutes=payload.expiry_minutes)
 
         proposal = TradeProposal(
@@ -212,7 +223,10 @@ class TradingWorkflowService:
         return self._to_proposal_response(proposal)
 
     def approve_proposal(
-        self, proposal_id: uuid.UUID, payload: ProposalApproveRequest
+        self,
+        proposal_id: uuid.UUID,
+        payload: ProposalApproveRequest,
+        approver_user_id: Optional[uuid.UUID] = None,
     ) -> TradeProposalResponse:
         """
         Quy trình phê duyệt đề xuất giao dịch bởi con người (Mục 9.4 & 10.1):
@@ -220,11 +234,12 @@ class TradingWorkflowService:
         2. Kiểm tra trạng thái hiện tại phải là `PendingApproval`.
         3. Kiểm tra hạn hiệu lực (`expires_at`); nếu quá hạn -> chuyển sang `Expired` và báo lỗi.
         4. Kiểm tra khớp snapshot (`expected_quantity`, `expected_limit_price`, `expected_stop_loss`).
-        5. Tạo bản ghi `trading.approvals` (`decision="APPROVED"`).
+        5. Tạo bản ghi `trading.approvals` (`decision="APPROVED"`, lưu `approved_by` snapshot và `approver_user_id` từ JWT).
         6. Chuyển qua bước `RiskValidation` và **Re-validate toàn bộ Risk** tại thời điểm duyệt:
            - Nếu vi phạm (ví dụ Kill Switch vừa bật hoặc hết tiền) -> chuyển sang `Blocked` và không tạo Order.
-           - Nếu đạt -> chuyển sang `Submitted` và gọi `PaperBrokerAdapter` tạo đúng 1 `Order`.
+           - Nếu đạt -> chuyển sang `Submitted` và gọi `PaperBrokerAdapter` tạo đúng 1 `Order` gắn `approval_id`.
         """
+        approver = _require_actor(payload.approved_by)
         proposal = self.session.scalar(
             select(TradeProposal)
             .where(TradeProposal.id == proposal_id)
@@ -242,13 +257,13 @@ class TradingWorkflowService:
                 detail=f"Proposal '{proposal_id}' không còn ở trạng thái chờ duyệt (trạng thái hiện tại: {proposal.status}).",
             )
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = clock.utc_now()
         if now_utc >= _ensure_utc(proposal.expires_at):
             assert_proposal_transition(proposal.status, "Expired")
             proposal.status = "Expired"
             record_audit_log(
                 session=self.session,
-                actor=payload.approved_by,
+                actor=approver,
                 action="PROPOSAL_EXPIRED_ON_APPROVE_ATTEMPT",
                 entity_type="TradeProposal",
                 entity_id=str(proposal.id),
@@ -284,7 +299,8 @@ class TradingWorkflowService:
         approval = Approval(
             proposal_id=proposal.id,
             decision="APPROVED",
-            approved_by=payload.approved_by,
+            approved_by=approver,
+            approver_user_id=approver_user_id,
             comment=payload.comment,
         )
         self.session.add(approval)
@@ -317,7 +333,7 @@ class TradingWorkflowService:
             proposal.status = "Blocked"
             record_audit_log(
                 session=self.session,
-                actor=payload.approved_by,
+                actor=approver,
                 action="PROPOSAL_BLOCKED_ON_REVALIDATION",
                 entity_type="TradeProposal",
                 entity_id=str(proposal.id),
@@ -347,12 +363,17 @@ class TradingWorkflowService:
 
         record_audit_log(
             session=self.session,
-            actor=payload.approved_by,
+            actor=approver,
             action="PROPOSAL_APPROVED_AND_ORDER_CREATED",
             entity_type="TradeProposal",
             entity_id=str(proposal.id),
             before_state={"status": "PendingApproval"},
-            after_state={"status": proposal.status, "order_id": str(order.id)},
+            after_state={
+                "status": proposal.status,
+                "order_id": str(order.id),
+                "approval_id": str(approval.id),
+                "approver_user_id": str(approver_user_id) if approver_user_id else None,
+            },
         )
 
         self.session.commit()
@@ -360,9 +381,13 @@ class TradingWorkflowService:
         return self._to_proposal_response(proposal, order_id=order.id)
 
     def reject_proposal(
-        self, proposal_id: uuid.UUID, payload: ProposalRejectRequest
+        self,
+        proposal_id: uuid.UUID,
+        payload: ProposalRejectRequest,
+        approver_user_id: Optional[uuid.UUID] = None,
     ) -> TradeProposalResponse:
         """Từ chối đề xuất giao dịch và ghi nhận quyết định vào `trading.approvals` + `system.audit_logs`."""
+        approver = _require_actor(payload.rejected_by)
         proposal = self.session.scalar(
             select(TradeProposal)
             .where(TradeProposal.id == proposal_id)
@@ -384,14 +409,15 @@ class TradingWorkflowService:
             Approval(
                 proposal_id=proposal.id,
                 decision="REJECTED",
-                approved_by=payload.rejected_by,
+                approved_by=approver,
+                approver_user_id=approver_user_id,
                 comment=payload.comment,
             )
         )
 
         record_audit_log(
             session=self.session,
-            actor=payload.rejected_by,
+            actor=approver,
             action="PROPOSAL_REJECTED",
             entity_type="TradeProposal",
             entity_id=str(proposal.id),

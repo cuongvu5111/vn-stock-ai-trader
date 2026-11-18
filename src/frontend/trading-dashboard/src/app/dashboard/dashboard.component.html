@@ -27,10 +27,10 @@
     </nav>
 
     <div class="sidebar-footer">
-      <button type="button" class="btn btn-emerald w-full mb-1" [disabled]="isLoading" (click)="syncRealMarketAndRunPipeline()">
+      <button type="button" class="btn btn-emerald w-full mb-1" [disabled]="isLoading || !caps.canSyncRealData" [attr.title]="caps.canSyncRealData ? null : 'Chỉ admin được đồng bộ dữ liệu thật'" (click)="syncRealMarketAndRunPipeline()">
         🌐 Đồng Bộ Giá Thật VN30 &amp; Chạy Pipeline
       </button>
-      <button type="button" class="btn btn-primary w-full" [disabled]="isLoading" (click)="triggerDailyWorkflow()">
+      <button type="button" class="btn btn-primary w-full" [disabled]="isLoading || !caps.canOperate" [attr.title]="caps.canOperate ? null : 'Viewer chỉ được xem'" (click)="triggerDailyWorkflow()">
         ⚡ Chạy Daily EOD Pipeline
       </button>
       <p class="hint mt-1">
@@ -54,12 +54,25 @@
           class="btn"
           [class.btn-danger]="!riskStatus?.kill_switch_active"
           [class.btn-emerald]="riskStatus?.kill_switch_active"
+          [disabled]="isLoading || !killSwitchToggleAllowed"
+          [attr.title]="killSwitchToggleAllowed ? null : killSwitchBlockedHint"
           (click)="toggleKillSwitchQuick()"
         >
           {{ riskStatus?.kill_switch_active ? 'Mở lại Giao dịch' : 'Bật Kill Switch' }}
         </button>
+        <div class="user-chip" data-testid="user-chip">
+          <strong>{{ auth.user()?.username }}</strong>
+          <span class="pill">{{ auth.role() }}</span>
+        </div>
+        <button type="button" class="btn" (click)="logout()">Đăng xuất</button>
       </div>
     </header>
+
+    @if (!caps.canOperate) {
+      <div class="toast-banner" role="note">
+        <span>Tài khoản <strong>viewer</strong> chỉ có quyền xem: mọi thao tác nghiệp vụ đã bị vô hiệu hóa.</span>
+      </div>
+    }
 
     @if (toastMessage) {
       <div class="toast-banner" [class.toast-error]="toastType === 'error'" [class.toast-success]="toastType === 'success'">
@@ -208,10 +221,10 @@
         <div class="card span-2">
           <h3>Thao Tác Dữ Liệu &amp; Chỉ Báo Kỹ Thuật</h3>
           <div class="row-actions">
-            <button type="button" class="btn btn-emerald" (click)="syncRealMarketAndRunPipeline()">
+            <button type="button" class="btn btn-emerald" [disabled]="isLoading || !caps.canSyncRealData" [attr.title]="caps.canSyncRealData ? null : 'Chỉ admin được đồng bộ dữ liệu thật'" (click)="syncRealMarketAndRunPipeline()">
               🌐 Đồng Bộ Dữ Liệu Thật (10 Mã VN30/HOSE) &amp; Xóa [SAMPLE]
             </button>
-            <button type="button" class="btn" (click)="recalculateIndicators()">
+            <button type="button" class="btn" [disabled]="isLoading || !caps.canOperate" (click)="recalculateIndicators()">
               Tính Lại Toàn Bộ Indicators (MA/EMA/RSI/MACD/ATR)
             </button>
           </div>
@@ -254,7 +267,7 @@
               <div class="chart-legend">
                 <span class="legend-close">── Giá đóng cửa ({{ selectedSymbol }})</span>
                 <span class="legend-ma20">- - Đường MA20</span>
-                <span class="hint">Nguồn: {{ priceHistory[priceHistory.length - 1]?.source_name }} ({{ priceHistory.length }} phiên)</span>
+                <span class="hint">Nguồn: {{ priceHistory[priceHistory.length - 1].source_name }} ({{ priceHistory.length }} phiên)</span>
               </div>
             </div>
           }
@@ -275,12 +288,38 @@
               placeholder="HPG,2026-05-18,22300,22600,22100,22500,2800000,HOSE,SAMPLE"
             ></textarea>
           </div>
-          <button type="button" class="btn btn-primary" (click)="submitCsvImport()">
+          <button type="button" class="btn btn-primary" [disabled]="isLoading || !caps.canOperate" (click)="submitCsvImport()">
             Kiểm Tra & Import CSV
           </button>
         </section>
       </div>
 
+      @if (caps.canCreateStock) {
+        <section class="card mb-2">
+          <h3>Thêm Mã Cổ Phiếu Mới (chỉ admin)</h3>
+          <div class="form-row">
+            <div>
+              <label for="nsSymbol">Mã CK:</label>
+              <input id="nsSymbol" type="text" [(ngModel)]="newStockSymbol" placeholder="FPT" />
+            </div>
+            <div>
+              <label for="nsExchange">Sàn:</label>
+              <select id="nsExchange" [(ngModel)]="newStockExchange">
+                <option value="HOSE">HOSE</option>
+                <option value="HNX">HNX</option>
+                <option value="UPCOM">UPCOM</option>
+              </select>
+            </div>
+            <div class="span-2">
+              <label for="nsName">Tên công ty (tùy chọn):</label>
+              <input id="nsName" type="text" [(ngModel)]="newStockCompanyName" />
+            </div>
+            <div>
+              <button type="button" class="btn btn-primary" [disabled]="isLoading" (click)="createStock()">Thêm mã</button>
+            </div>
+          </div>
+        </section>
+      }
       <section class="card">
         <h3>Bảng Lịch Sử Giá OHLCV & Chỉ Báo Kỹ Thuật ({{ selectedSymbol }})</h3>
         @if (priceHistory.length === 0) {
@@ -338,7 +377,7 @@
               Chỉ hiển thị tín hiệu hành động (BUY / SELL)
             </label>
           </div>
-          <button type="button" class="btn btn-primary" (click)="runStockScanner()">
+          <button type="button" class="btn btn-primary" [disabled]="isLoading || !caps.canOperate" (click)="runStockScanner()">
             🔍 Chạy Stock Scanner Ngay
           </button>
         </section>
@@ -359,7 +398,7 @@
               <input id="btEnd" type="text" [(ngModel)]="backtestEndDate" />
             </div>
           </div>
-          <button type="button" class="btn btn-primary mt-1" (click)="runBacktestSimulation()">
+          <button type="button" class="btn btn-primary mt-1" [disabled]="isLoading || !caps.canOperate" (click)="runBacktestSimulation()">
             📊 Chạy Backtest Chiến Lược
           </button>
 
@@ -429,7 +468,7 @@
                         Chi Tiết &amp; AI
                       </button>
                       @if (sig.action === 'BUY' || sig.action === 'SELL') {
-                        <button type="button" class="btn btn-sm btn-primary" (click)="createProposalFromSignal(sig)">
+                        <button type="button" class="btn btn-sm btn-primary" [disabled]="isLoading || !caps.canOperate" (click)="createProposalFromSignal(sig)">
                           Tạo Proposal
                         </button>
                       }
@@ -471,11 +510,11 @@
             </ul>
 
             <div class="row-actions mt-1">
-              <button type="button" class="btn btn-primary" (click)="generateAiReportForSelectedSignal()">
+              <button type="button" class="btn btn-primary" [disabled]="isLoading || !caps.canOperate" (click)="generateAiReportForSelectedSignal()">
                 🤖 Sinh Báo Cáo Giải Thích AI (Có Trích Dẫn Nguồn)
               </button>
               @if (selectedSignal.action === 'BUY' || selectedSignal.action === 'SELL') {
-                <button type="button" class="btn btn-emerald" (click)="createProposalFromSignal(selectedSignal)">
+                <button type="button" class="btn btn-emerald" [disabled]="isLoading || !caps.canOperate" (click)="createProposalFromSignal(selectedSignal)">
                   ➕ Tạo Trade Proposal Chờ Duyệt
                 </button>
               }
@@ -548,16 +587,16 @@
         </p>
         <div class="form-row">
           <div>
-            <label for="appBy">Người phê duyệt (`approved_by`):</label>
-            <input id="appBy" type="text" [(ngModel)]="approverName" placeholder="trader_cuong" />
+            <span class="hint">Người phê duyệt:</span>
+            <p><strong>{{ auth.user()?.username }}</strong> ({{ auth.role() }}) — lấy từ phiên đăng nhập (JWT)</p>
           </div>
           <div class="span-2">
             <label for="appCmt">Ghi chú phê duyệt / từ chối (`comment`):</label>
-            <input id="appCmt" type="text" [(ngModel)]="approvalComment" />
+            <input id="appCmt" type="text" [(ngModel)]="approvalComment" [disabled]="!caps.canOperate" />
           </div>
           <div>
             <label class="checkbox-label">
-              <input type="checkbox" [(ngModel)]="autoFillOnApprove" />
+              <input type="checkbox" [(ngModel)]="autoFillOnApprove" [disabled]="!caps.canOperate" />
               Khớp ngay trên Paper Broker sau khi duyệt
             </label>
           </div>
@@ -621,7 +660,7 @@
                         <button
                           type="button"
                           class="btn btn-sm btn-emerald"
-                          [disabled]="isLoading"
+                          [disabled]="isLoading || !caps.canOperate"
                           (click)="approveProposalItem(prop)"
                         >
                           ✓ Approve
@@ -629,7 +668,7 @@
                         <button
                           type="button"
                           class="btn btn-sm btn-danger"
-                          [disabled]="isLoading"
+                          [disabled]="isLoading || !caps.canOperate"
                           (click)="rejectProposalItem(prop)"
                         >
                           ✕ Reject
@@ -715,18 +754,20 @@
                           min="100"
                           class="input-sm"
                           [(ngModel)]="fillQuantityMap[ord.id]"
+                          [disabled]="!caps.canOperate"
                           aria-label="Khối lượng khớp"
                         />
                         <input
                           type="text"
                           class="input-sm"
                           [(ngModel)]="fillPriceMap[ord.id]"
+                          [disabled]="!caps.canOperate"
                           aria-label="Giá khớp"
                         />
-                        <button type="button" class="btn btn-sm btn-emerald" (click)="simulateFill(ord)">
+                        <button type="button" class="btn btn-sm btn-emerald" [disabled]="isLoading || !caps.canOperate" (click)="simulateFill(ord)">
                           Khớp Lệnh
                         </button>
-                        <button type="button" class="btn btn-sm btn-danger" (click)="cancelPaperOrder(ord)">
+                        <button type="button" class="btn btn-sm btn-danger" [disabled]="isLoading || !caps.canOperate" (click)="cancelPaperOrder(ord)">
                           Hủy
                         </button>
                       </div>
@@ -755,10 +796,10 @@
             </p>
           </div>
           <div class="row-actions">
-            <button type="button" class="btn" (click)="takeDailySnapshot()">
+            <button type="button" class="btn" [disabled]="isLoading || !caps.canOperate" (click)="takeDailySnapshot()">
               📸 Chốt NAV Cuối Ngày (Daily Snapshot)
             </button>
-            <button type="button" class="btn btn-primary" (click)="runPortfolioReconciliation()">
+            <button type="button" class="btn btn-primary" [disabled]="isLoading || !caps.canOperate" (click)="runPortfolioReconciliation()">
               🔄 Đối Soát &amp; Rebuild Từ Sổ Cái (Reconcile)
             </button>
           </div>
@@ -850,52 +891,55 @@
           <div class="form-row mb-1">
             <div>
               <label for="maxPos">Tỷ trọng tối đa / 1 mã (% NAV):</label>
-              <input id="maxPos" type="text" [(ngModel)]="editableRiskConfig.max_position_percent" />
+              <input id="maxPos" type="text" [(ngModel)]="editableRiskConfig.max_position_percent" [disabled]="!caps.canEditRiskConfig" />
             </div>
             <div>
               <label for="maxRisk">Rủi ro tối đa / 1 lệnh (% NAV):</label>
-              <input id="maxRisk" type="text" [(ngModel)]="editableRiskConfig.max_risk_per_trade_percent" />
+              <input id="maxRisk" type="text" [(ngModel)]="editableRiskConfig.max_risk_per_trade_percent" [disabled]="!caps.canEditRiskConfig" />
             </div>
           </div>
 
           <div class="form-row mb-1">
             <div>
               <label for="maxDailyLoss">Giới hạn lỗ tối đa trong ngày (% NAV):</label>
-              <input id="maxDailyLoss" type="text" [(ngModel)]="editableRiskConfig.max_daily_loss_percent" />
+              <input id="maxDailyLoss" type="text" [(ngModel)]="editableRiskConfig.max_daily_loss_percent" [disabled]="!caps.canEditRiskConfig" />
             </div>
             <div>
               <label for="maxAlloc">Tỷ trọng cổ phiếu tối đa toàn danh mục (%):</label>
-              <input id="maxAlloc" type="text" [(ngModel)]="editableRiskConfig.max_portfolio_allocation_percent" />
+              <input id="maxAlloc" type="text" [(ngModel)]="editableRiskConfig.max_portfolio_allocation_percent" [disabled]="!caps.canEditRiskConfig" />
             </div>
           </div>
 
           <div class="form-row mb-1">
             <div>
               <label for="maxOpenPos">Số vị thế mở tối đa:</label>
-              <input id="maxOpenPos" type="number" [(ngModel)]="editableRiskConfig.max_open_positions" />
+              <input id="maxOpenPos" type="number" [(ngModel)]="editableRiskConfig.max_open_positions" [disabled]="!caps.canEditRiskConfig" />
             </div>
             <div>
               <label class="checkbox-label">
-                <input type="checkbox" [(ngModel)]="editableRiskConfig.trading_enabled" />
+                <input type="checkbox" [(ngModel)]="editableRiskConfig.trading_enabled" [disabled]="!caps.canEditRiskConfig" />
                 Cho phép giao dịch (`trading_enabled` - Bỏ chọn = BẬT KILL SWITCH)
               </label>
             </div>
           </div>
 
           <div class="form-row mb-1">
-            <div>
-              <label for="rkActor">Người thực hiện (`actor`):</label>
-              <input id="rkActor" type="text" [(ngModel)]="riskUpdateActor" />
-            </div>
             <div class="span-2">
               <label for="rkReason">Lý do thay đổi (Bắt buộc ghi vào Audit Log):</label>
-              <input id="rkReason" type="text" [(ngModel)]="riskUpdateReason" />
+              <input id="rkReason" type="text" [(ngModel)]="riskUpdateReason" [disabled]="!caps.canEditRiskConfig" />
             </div>
           </div>
 
-          <button type="button" class="btn btn-primary" (click)="saveRiskConfiguration()">
-            💾 Lưu Cấu Hình Rủi Ro &amp; Ghi Audit Log
-          </button>
+          @if (caps.canEditRiskConfig) {
+            <button type="button" class="btn btn-primary" [disabled]="isLoading" (click)="saveRiskConfiguration()">
+              💾 Lưu Cấu Hình Rủi Ro &amp; Ghi Audit Log
+            </button>
+          } @else {
+            <p class="hint">
+              Chỉ admin được thay đổi hạn mức rủi ro (người thực hiện được ghi từ phiên đăng nhập).
+              Trader có thể bật Kill Switch ở thanh trên; chỉ admin được tắt.
+            </p>
+          }
         </section>
 
         <section class="card">
@@ -930,6 +974,10 @@
           }
         </section>
       </div>
+    }
+
+    @if (activeTab === 'users' && caps.canManageUsers) {
+      <app-user-admin />
     }
   </main>
 </div>

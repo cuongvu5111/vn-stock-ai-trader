@@ -1,18 +1,33 @@
-# ============================================================
 # Ngày tạo: 2026-11-03
-# Mục đích: Cấu hình Docker Compose cho môi trường Local MVP
-# Gồm 3 services: postgres, trading-backend, trading-frontend
-# ============================================================
+# Cập nhật: 2026-11-17 — cứng hóa chạy LAN bằng Docker Compose (không Kubernetes, không giao dịch thật).
+# Mục đích: Cấu hình Docker Compose cho Local/LAN gồm postgres, trading-backend, trading-frontend (+ postgres-backup tùy chọn).
+#
+# Phơi bày mạng:
+#   - CHỈ trading-frontend (nginx) có thể bind ra LAN, qua FRONTEND_BIND_ADDRESS (mặc định 127.0.0.1 = chỉ máy này).
+#   - postgres và trading-backend chỉ publish trên loopback 127.0.0.1 (cố định, không có biến cấu hình để mở ra LAN);
+#     frontend gọi backend qua mạng nội bộ Docker (reverse proxy /api trong nginx).
+#   - Truy cập qua HTTP thường, KHÔNG mã hóa: chỉ dùng trong LAN tin cậy (xem README mục LAN).
+#
+# Secret bắt buộc (compose dừng ngay nếu thiếu): DB_PASSWORD, JWT_SECRET_KEY, BOOTSTRAP_ADMIN_PASSWORD. Không có giá trị mặc định.
+
+name: vn-stock-ai-trader
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   postgres:
     image: postgres:16-alpine
     container_name: vn-stock-postgres
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-trading_db}
       POSTGRES_USER: ${POSTGRES_USER:-trader}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_local_only}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Thiếu DB_PASSWORD trong .env (mật khẩu PostgreSQL ngẫu nhiên, chỉ gồm A-Za-z0-9._~-)}
       TZ: Asia/Ho_Chi_Minh
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
@@ -20,10 +35,22 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infrastructure/postgres/init-schemas.sql:/docker-entrypoint-initdb.d/01-init-schemas.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-trader} -d $${POSTGRES_DB:-trading_db}"]
+      # -h 127.0.0.1 bắt buộc: ở lần khởi tạo đầu, server tạm chỉ lắng nghe unix socket nên pg_isready mặc định báo "ready"
+      # trước khi server thật nhận kết nối TCP, khiến service phụ thuộc (backend, backup) kết nối thất bại.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER:-trader} -d $${POSTGRES_DB:-trading_db}"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          pids: 200
+          cpus: "1.0"
+          memory: 1g
+    logging: *default-logging
 
   trading-backend:
     build:
@@ -31,20 +58,39 @@ services:
       dockerfile: src/backend/Dockerfile
     container_name: vn-stock-backend
     restart: unless-stopped
+    # Đủ thời gian để scheduler đợi workflow EOD đang chạy kết thúc trước khi tắt.
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       APP_NAME: ${APP_NAME:-Personal AI Trading Assistant}
-      APP_ENV: ${APP_ENV:-development}
+      # Mặc định production: tắt Swagger và bật kiểm tra cứng hóa (DB_PASSWORD, CORS_ORIGINS, TRUSTED_HOSTS).
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-trading_db}
       POSTGRES_USER: ${POSTGRES_USER:-trader}
-      DB_PASSWORD: ${DB_PASSWORD:-change_me_local_only}
+      DB_PASSWORD: ${DB_PASSWORD:?Thiếu DB_PASSWORD trong .env (mật khẩu PostgreSQL ngẫu nhiên, chỉ gồm A-Za-z0-9._~-)}
       INITIAL_PAPER_CAPITAL: ${INITIAL_PAPER_CAPITAL:-30000000}
+      MARKET_TIMEZONE: ${MARKET_TIMEZONE:-Asia/Ho_Chi_Minh}
+      SETTLEMENT_LAG_TRADING_DAYS: ${SETTLEMENT_LAG_TRADING_DAYS:-2}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Thiếu JWT_SECRET_KEY (>=32 ký tự ngẫu nhiên) trong .env}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      AUTH_MAX_FAILED_LOGINS: ${AUTH_MAX_FAILED_LOGINS:-5}
+      AUTH_LOCKOUT_MINUTES: ${AUTH_LOCKOUT_MINUTES:-15}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      # Chỉ dùng để tạo admin đầu tiên khi chưa có user trùng tên; không bao giờ ghi đè mật khẩu của user đã tồn tại.
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Thiếu BOOTSTRAP_ADMIN_PASSWORD (>=12 ký tự) trong .env để tạo admin đầu tiên}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4200,http://127.0.0.1:4200}
+      # Backend chỉ nhận Host nội bộ: nginx luôn gửi Host=trading-backend, healthcheck/loopback dùng localhost/127.0.0.1.
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1,trading-backend}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-false}
+      DAILY_EOD_HOUR: ${DAILY_EOD_HOUR:-16}
+      DAILY_EOD_MINUTE: ${DAILY_EOD_MINUTE:-30}
+      SCHEDULER_MISFIRE_GRACE_SECONDS: ${SCHEDULER_MISFIRE_GRACE_SECONDS:-3600}
       AI_ENABLED: ${AI_ENABLED:-false}
       AI_PROVIDER: ${AI_PROVIDER:-mock}
       AI_MODEL: ${AI_MODEL:-mock-v1}
@@ -55,10 +101,30 @@ services:
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
-      interval: 10s
-      timeout: 5s
+      # Dùng Python có sẵn trong image (không cần curl); chỉ healthy khi API trả status=healthy (DB kết nối được).
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import json, sys, urllib.request; r = json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4)); sys.exit(0 if r.get('status') == 'healthy' else 1)"
+      interval: 15s
+      timeout: 6s
       retries: 5
+      start_period: 60s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          pids: 200
+          cpus: "1.5"
+          memory: 1g
+    logging: *default-logging
 
   trading-frontend:
     build:
@@ -70,7 +136,82 @@ services:
       trading-backend:
         condition: service_healthy
     ports:
-      - "127.0.0.1:4200:80"
+      # Cổng duy nhất có thể mở cho LAN. Đặt FRONTEND_BIND_ADDRESS=<IP LAN của máy chủ> (không dùng 0.0.0.0 trừ khi cố ý).
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-4200}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          pids: 100
+          cpus: "0.5"
+          memory: 128m
+    logging: *default-logging
+
+  # Sao lưu tự động định kỳ (profile `backup`, không chạy mặc định):
+  #   docker compose --profile backup up -d postgres-backup
+  # File .dump (pg_dump -Fc) lưu ở thư mục BACKUP_DIR (mặc định ./backups); xóa bản cũ hơn BACKUP_RETENTION_DAYS
+  # nhưng luôn giữ tối thiểu BACKUP_MIN_KEEP bản mới nhất.
+  postgres-backup:
+    image: postgres:16-alpine
+    container_name: vn-stock-backup
+    profiles: ["backup"]
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Chờ backend chạy xong migration để bản sao lưu đầu tiên không phải là một database rỗng.
+      trading-backend:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup-loop.sh"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-trading_db}
+      PGUSER: ${POSTGRES_USER:-trader}
+      PGPASSWORD: ${DB_PASSWORD:?Thiếu DB_PASSWORD trong .env (mật khẩu PostgreSQL ngẫu nhiên, chỉ gồm A-Za-z0-9._~-)}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_MIN_KEEP: ${BACKUP_MIN_KEEP:-3}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+      - ./infrastructure/backup/backup-loop.sh:/usr/local/bin/backup-loop.sh:ro
+    healthcheck:
+      # Healthy khi đã có bản sao lưu thành công trong khoảng 2 chu kỳ + 1 giờ gần đây.
+      test: ["CMD-SHELL", "test -n \"$$(find /backups -maxdepth 1 -name '*.dump' -mmin -$$(( BACKUP_INTERVAL_HOURS * 120 + 60 )) | head -n 1)\""]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          pids: 50
+          cpus: "0.5"
+          memory: 256m
+    logging: *default-logging
 
 volumes:
   postgres_data:

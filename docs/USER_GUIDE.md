@@ -18,19 +18,26 @@
 
 ### Cách 1: Chạy trọn bộ bằng Docker Compose (Khuyến nghị)
 ```powershell
-# 1. Sao chép file cấu hình môi trường
+# 1. Sao chép file cấu hình môi trường và sinh secret ngẫu nhiên
 Copy-Item .env.example .env
+.\scripts\generate-secrets.ps1     # dán DB_PASSWORD, JWT_SECRET_KEY, BOOTSTRAP_ADMIN_PASSWORD vào .env (KHÔNG commit .env)
 
-# 2. Khởi động PostgreSQL 16, FastAPI Backend và Angular Dashboard
-docker compose up --build -d
-
-# 3. Chạy Alembic migration & nạp dữ liệu khởi tạo (Idempotent)
-docker compose exec trading-backend alembic upgrade head
-docker compose exec trading-backend python /workspace/database/seeds/seed_initial.py
+# 2. Khởi động PostgreSQL 16, FastAPI Backend và Angular Dashboard (tự chạy Alembic migration + seed idempotent)
+docker compose up --build -d --wait
 ```
-- **Angular Dashboard:** `http://localhost:4200`
-- **FastAPI Swagger UI:** `http://localhost:8000/docs`
-- **Health Check:** `http://localhost:8000/api/v1/health`
+- **Angular Dashboard:** `http://127.0.0.1:4200` — đăng nhập bằng `BOOTSTRAP_ADMIN_USERNAME` (mặc định `admin`) và `BOOTSTRAP_ADMIN_PASSWORD` trong `.env` (admin đầu tiên chỉ được tạo khi chưa có user trùng tên; sau đó hãy đổi mật khẩu ngay trong dashboard).
+- **Health Check:** `http://127.0.0.1:4200/api/v1/health` (qua nginx) hoặc `http://127.0.0.1:8000/api/v1/health` (cổng loopback của backend).
+- **FastAPI Swagger UI:** `http://127.0.0.1:8000/docs` — **chỉ** khi đặt `APP_ENV=development` trong `.env` (Compose mặc định `production` nên Swagger tắt).
+- Thiếu `DB_PASSWORD`, `JWT_SECRET_KEY` hoặc `BOOTSTRAP_ADMIN_PASSWORD` thì `docker compose` dừng ngay với thông báo rõ ràng.
+
+### Cách 1b: Truy cập từ máy khác trong LAN
+> ⚠️ **HTTP thường, không mã hóa:** mật khẩu và JWT có thể bị nghe lén trong cùng mạng. Chỉ dùng LAN tin cậy, không mở ra Internet. Cần mã hóa thì đặt thêm reverse proxy TLS hoặc VPN.
+
+1. Trong `.env`: `FRONTEND_BIND_ADDRESS=192.168.1.10` (IP LAN của máy chủ) và `APP_ENV=production`.
+2. `docker compose up -d --build --wait`, rồi mở `http://192.168.1.10:4200` trên máy khác.
+3. Chỉ mở firewall cho cổng `4200` từ mạng LAN. PostgreSQL (`5432`) và backend (`8000`) **luôn chỉ bind `127.0.0.1`**, không thể truy cập từ LAN.
+
+Chi tiết cứng hóa nginx, `TRUSTED_HOSTS`/`CORS_ORIGINS`, rate limit đăng nhập và đổi `DB_PASSWORD` xem `README.md` mục 3 và `DESIGN.md` mục 5.
 
 ### Cách 2: Chạy trực tiếp trên máy phát triển
 ```powershell
@@ -57,6 +64,7 @@ npm start
   4. Sinh báo cáo giải thích AI có trích dẫn nguồn cho các tín hiệu `BUY` / `SELL`.
   5. Chạy `Risk Engine` tính toán khối lượng đặt lệnh tối ưu theo lô 100 cổ phiếu và tạo `TradeProposal` ở trạng thái `PendingApproval`.
   6. Chốt bản chụp `Daily Snapshot` cho danh mục Paper.
+- **Tự động hằng ngày (tùy chọn):** đặt `SCHEDULER_ENABLED=true` trong `.env` để backend tự chạy pipeline này lúc **16:30 thứ 2 → thứ 6 (giờ `Asia/Ho_Chi_Minh`)**; đổi giờ bằng `DAILY_EOD_HOUR`/`DAILY_EOD_MINUTE`. Bản tự động **không nạp dữ liệu mẫu**, chỉ chạy AI khi `AI_ENABLED=true`, và **luôn dừng ở đề xuất `PendingApproval`** — không tự duyệt, không tự khớp lệnh. Hãy import dữ liệu giá của ngày giao dịch trước 16:30 vì scheduler không tự nạp dữ liệu; nếu DB còn dữ liệu `SAMPLE` đã nạp trước đó, đề xuất vẫn được sinh từ dữ liệu đó nên hãy nạp dữ liệu thật (xóa SAMPLE) trước khi bật scheduler. Kết quả (`COMPLETED`/`FAILED` kèm `error_detail`) nằm ở `GET /api/v1/system/jobs` và log `scheduler_daily_eod_*` (`docker compose logs trading-backend`). Chạy đúng một backend/một worker khi bật scheduler.
 
 ### Bước 2: Kiểm tra Dữ liệu & Biểu đồ (`Màn hình 2. Market Data`)
 - Chọn mã cổ phiếu (`HPG`, `ACB`, `FPT`) để quan sát biểu đồ SVG hiển thị đường giá đóng cửa (`Close`) và đường trung bình động `MA20`.
@@ -97,18 +105,26 @@ npm start
 
 ## 4. Hướng Dẫn Sao Lưu & Phục Hồi Cơ Sở Dữ Liệu (Backup & Restore)
 
-### 4.1. Sao lưu (Backup) PostgreSQL ra file `.dump`
-```powershell
-# Tạo thư mục lưu trữ bản sao lưu
-New-Item -ItemType Directory -Force -Path backups
+> File .dump chứa dữ liệu nhạy cảm (băm mật khẩu, sổ lệnh, audit). Hãy bảo vệ file, chép thêm sang ổ/máy khác và thử khôi phục định kỳ.
 
-# Chạy pg_dump bên trong container postgres
-docker compose exec -T postgres pg_dump -U trader -d trading_db -F c > backups/trading_db_backup.dump
-```
-
-### 4.2. Phục hồi (Restore) từ file `.dump`
+### 4.1. Sao lưu thủ công (PostgreSQL ra file `.dump`)
 ```powershell
-# Khôi phục lại toàn bộ 6 schemas từ file backup
-Get-Content backups/trading_db_backup.dump -Raw | docker compose exec -T postgres pg_restore -U trader -d trading_db --clean --if-exists
+.\database\scripts\backup-db.ps1                                   # -> backups\trading_db_<UTC>.dump
+.\database\scripts\backup-db.ps1 -OutputDir D:\backups\trading -KeepLast 14
 ```
-After restoring, chạy API `POST /api/v1/portfolio/reconcile` (hoặc nhấn nút **Reconcile** trên Màn hình 7) để xác nhận tính toàn vẹn 100% của sổ cái danh mục.
+Script dump bên trong container rồi `docker compose cp` ra máy chủ; **không** dùng `docker compose exec ... > file` trong PowerShell vì chuyển hướng văn bản làm hỏng file nhị phân.
+
+### 4.2. Sao lưu tự động theo lịch (service `postgres-backup`)
+```powershell
+docker compose --profile backup up -d postgres-backup
+docker compose logs postgres-backup
+```
+Cấu hình trong `.env`: `BACKUP_DIR` (mặc định `./backups`), `BACKUP_INTERVAL_HOURS` (24), `BACKUP_RETENTION_DAYS` (14), `BACKUP_MIN_KEEP` (3 — luôn giữ tối thiểu số bản mới nhất này dù đã quá hạn). Bản sao lưu được kiểm tra bằng `pg_restore --list` trước khi tính là hợp lệ; lỗi thì thử lại sau vài phút và ghi log `THAT BAI`.
+
+### 4.3. Phục hồi (Restore) từ file `.dump`
+```powershell
+.\database\scripts\restore-db.ps1 -InputFile .\backups\trading_db_20261117T093000Z.dump
+```
+Script yêu cầu gõ `RESTORE` để xác nhận (`-Force` để bỏ qua), tạm dừng `trading-backend`, khôi phục trong một transaction (lỗi thì dữ liệu hiện tại giữ nguyên) rồi khởi động lại backend. **Ghi đè toàn bộ dữ liệu hiện tại** — nên sao lưu trước.
+
+Sau khi phục hồi, chạy API `POST /api/v1/portfolio/reconcile` (hoặc nhấn nút **Reconcile** trên Màn hình 7) để xác nhận tính toàn vẹn 100% của sổ cái danh mục.

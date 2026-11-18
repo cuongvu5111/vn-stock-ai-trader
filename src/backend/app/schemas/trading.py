@@ -4,7 +4,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,7 +17,9 @@ class RiskConfigPayload(BaseModel):
     max_daily_loss_percent: Decimal = Field(default=Decimal("2"), gt=Decimal("0"), le=Decimal("20"))
     max_open_positions: int = Field(default=5, ge=1, le=50)
     max_portfolio_allocation_percent: Decimal = Field(default=Decimal("70"), gt=Decimal("0"), le=Decimal("100"))
-    require_human_approval: bool = Field(default=True)
+    require_human_approval: Literal[True] = Field(
+        default=True, description="Luôn bắt buộc True trong MVP: mọi lệnh Paper phải có Human Approval, không thể tắt."
+    )
     trading_enabled: bool = Field(default=True, description="Kill Switch: False = chặn toàn bộ lệnh mới")
     fee_rate: Decimal = Field(default=Decimal("0.0015"), ge=Decimal("0"))
     tax_rate: Decimal = Field(default=Decimal("0.0010"), ge=Decimal("0"))
@@ -28,9 +30,20 @@ class RiskConfigPayload(BaseModel):
 class RiskConfigUpdateRequest(BaseModel):
     """Yêu cầu cập nhật cấu hình rủi ro hoặc kích hoạt Kill Switch (bắt buộc ghi Audit Log)."""
 
-    actor: str = Field(default="trader_user", min_length=1, max_length=100)
+    actor: str = Field(
+        default="trader_user",
+        min_length=1,
+        max_length=100,
+        description="Bị bỏ qua: backend luôn ghi đè bằng username lấy từ JWT.",
+    )
     reason: str = Field(default="Cập nhật cấu hình hạn mức rủi ro / Kill Switch", min_length=3)
     configuration: RiskConfigPayload
+
+
+class KillSwitchRequest(BaseModel):
+    """Yêu cầu bật/tắt Kill Switch khẩn cấp (actor lấy từ JWT, bắt buộc ghi Audit Log)."""
+
+    reason: str = Field(..., min_length=3, max_length=500)
 
 
 class AuditLogItemResponse(BaseModel):
@@ -77,7 +90,11 @@ class ProposalCreateRequest(BaseModel):
 class ProposalApproveRequest(BaseModel):
     """Yêu cầu phê duyệt đề xuất giao dịch bởi con người (Human Approval)."""
 
-    approved_by: str = Field(..., min_length=1, max_length=100, description="Định danh người phê duyệt")
+    approved_by: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Bị bỏ qua: backend luôn ghi đè bằng username lấy từ JWT (giữ lại để tương thích).",
+    )
     comment: Optional[str] = Field(default=None, max_length=500)
     expected_quantity: Optional[int] = Field(
         default=None,
@@ -100,7 +117,11 @@ class ProposalApproveRequest(BaseModel):
 class ProposalRejectRequest(BaseModel):
     """Yêu cầu từ chối đề xuất giao dịch."""
 
-    rejected_by: str = Field(..., min_length=1, max_length=100)
+    rejected_by: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Bị bỏ qua: backend luôn ghi đè bằng username lấy từ JWT (giữ lại để tương thích).",
+    )
     comment: Optional[str] = Field(default="Người dùng từ chối đề xuất.", max_length=500)
 
 
@@ -143,6 +164,8 @@ class ExecutionItemResponse(BaseModel):
     fee: Decimal
     tax: Decimal
     executed_at: datetime
+    trade_date: date = Field(description="Ngày giao dịch theo múi giờ thị trường (Asia/Ho_Chi_Minh)")
+    settlement_date: date = Field(description="Ngày thanh toán T+N: từ ngày này cổ phiếu mua mới được phép bán")
 
 
 class OrderResponse(BaseModel):
@@ -152,6 +175,7 @@ class OrderResponse(BaseModel):
 
     id: uuid.UUID
     proposal_id: Optional[uuid.UUID]
+    approval_id: uuid.UUID = Field(description="Approval APPROVED đã sinh ra lệnh này (mỗi approval tối đa một lệnh)")
     broker_name: str
     broker_order_id: Optional[str]
     client_order_id: str
@@ -194,7 +218,8 @@ class PositionItemResponse(BaseModel):
     symbol: str
     exchange: str
     quantity: int
-    available_quantity: int
+    available_quantity: int = Field(description="Số cổ phiếu đã thanh toán T+N, được phép bán tại as_of_date")
+    pending_settlement_quantity: int = Field(default=0, description="quantity - available_quantity (chưa về tài khoản)")
     average_cost: Decimal
     market_price: Decimal
     market_value: Decimal
@@ -205,6 +230,7 @@ class PositionItemResponse(BaseModel):
 class PortfolioOverviewResponse(BaseModel):
     """Tổng quan danh mục đầu tư Paper Trading."""
 
+    as_of_date: date = Field(description="Ngày thị trường dùng để tính số lượng khả dụng T+N")
     account_id: uuid.UUID
     account_name: str
     account_type: str
@@ -248,6 +274,7 @@ class ReconciliationReportResponse(BaseModel):
     discrepancies: List[str]
     positions_rebuilt_count: int
     reconciled_at: datetime
+    as_of_date: date = Field(description="Ngày thị trường dùng để dựng lại available_quantity theo T+N")
 
 
 class CashTransactionItemResponse(BaseModel):

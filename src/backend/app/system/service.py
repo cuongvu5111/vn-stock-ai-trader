@@ -4,9 +4,10 @@
 #   - Đảm bảo tính idempotent khi chạy lại cùng ngày.
 #   - Tự động dừng ở bước tạo `TradeProposal(status='PendingApproval')` chờ con người phê duyệt, tuyệt đối không auto-approve.
 
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -30,6 +31,9 @@ from app.schemas.trading import ProposalCreateRequest
 from app.screening.service import ScannerService
 from app.system.models import JobRun
 from app.trading.service import TradingWorkflowService
+
+DAILY_EOD_JOB_NAME = "DAILY_EOD_WORKFLOW"
+MAX_ERROR_MESSAGE_LENGTH = 500
 
 
 def _find_sample_csv_path() -> Path | None:
@@ -59,7 +63,12 @@ class SystemWorkflowService:
             items=[JobRunItemResponse.model_validate(r) for r in rows],
         )
 
-    def run_daily_eod_workflow(self, payload: DailyWorkflowRunRequest) -> DailyWorkflowRunResponse:
+    def run_daily_eod_workflow(
+        self,
+        payload: DailyWorkflowRunRequest,
+        actor: str = "daily_eod_scheduler",
+        job_run_id: Optional[uuid.UUID] = None,
+    ) -> DailyWorkflowRunResponse:
         """
         Thực thi quy trình EOD hàng ngày theo đúng thứ tự Mục 13:
         1. Import dữ liệu mẫu CSV nếu DB đang trống và `import_sample_csv_if_empty=True`.
@@ -68,14 +77,19 @@ class SystemWorkflowService:
         4. Phân tích AI giải thích cho các tín hiệu `BUY`/`SELL` (`AiAnalysisService`).
         5. Đánh giá rủi ro và tạo `TradeProposal` ở trạng thái `PendingApproval` (`TradingWorkflowService`).
         6. Chốt bản chụp NAV cuối ngày (`PortfolioService.create_or_update_daily_snapshot`).
+
+        `job_run_id` cho phép bên gọi (scheduler) biết trước khóa của JobRun để khi workflow lỗi giữa chừng
+        vẫn cập nhật đúng bản ghi `RUNNING` (nếu đã bị commit bởi các bước con) thay vì tạo thêm bản ghi lỗi trùng.
         """
         started_at = datetime.now(timezone.utc)
         job = JobRun(
-            job_name="DAILY_EOD_WORKFLOW",
+            job_name=DAILY_EOD_JOB_NAME,
             started_at=started_at,
             status="RUNNING",
             records_processed=0,
         )
+        if job_run_id is not None:
+            job.id = job_run_id
         self.session.add(job)
         self.session.flush()
 
@@ -160,7 +174,7 @@ class SystemWorkflowService:
                 try:
                     trading_svc.create_proposal_from_signal(
                         ProposalCreateRequest(signal_id=sig.id, expiry_minutes=240),
-                        actor="daily_eod_workflow",
+                        actor=actor,
                     )
                     proposals_created += 1
                 except HTTPException:
@@ -185,7 +199,7 @@ class SystemWorkflowService:
 
         record_audit_log(
             session=self.session,
-            actor="daily_eod_scheduler",
+            actor=actor,
             action="DAILY_EOD_WORKFLOW_COMPLETED",
             entity_type="JobRun",
             entity_id=str(job.id),
@@ -215,3 +229,55 @@ class SystemWorkflowService:
             started_at=started_at,
             completed_at=completed_at,
         )
+
+    def record_daily_eod_failure(
+        self,
+        job_run_id: uuid.UUID,
+        started_at: datetime,
+        error: BaseException,
+        actor: str = "daily_eod_scheduler",
+    ) -> JobRun:
+        """
+        Ghi nhận workflow EOD thất bại; chỉ gọi sau khi session đã `rollback()`.
+        - Các bước con (import/chỉ báo/scanner/proposal) tự commit nên bản ghi `RUNNING` có thể đã nằm trong DB:
+          khi đó cập nhật chính bản ghi đó sang `FAILED` để không sinh JobRun lỗi trùng.
+        - Nếu bản ghi chưa từng được commit (đã bị rollback) thì tạo mới `FAILED` với đúng `job_run_id`.
+        - Nếu bản ghi đã `COMPLETED` (lỗi chỉ xảy ra sau commit cuối) thì giữ nguyên, không ghi đè kết quả thành công.
+        """
+        job = self.session.scalar(select(JobRun).where(JobRun.id == job_run_id).with_for_update())
+        if job is not None and job.status == "COMPLETED":
+            return job
+
+        failed_at = datetime.now(timezone.utc)
+        error_detail = {
+            "error_type": type(error).__name__,
+            "error_message": str(error)[:MAX_ERROR_MESSAGE_LENGTH],
+            "failed_at_utc": failed_at.isoformat(),
+            "note": (
+                "Các bước đã commit trước khi lỗi được giữ nguyên; workflow không bao giờ duyệt "
+                "hay khớp lệnh nên không có Order/Execution nào được tạo."
+            ),
+        }
+        if job is None:
+            job = JobRun(
+                id=job_run_id,
+                job_name=DAILY_EOD_JOB_NAME,
+                started_at=started_at,
+                records_processed=0,
+            )
+            self.session.add(job)
+        job.status = "FAILED"
+        job.completed_at = failed_at
+        job.error_detail = error_detail
+
+        record_audit_log(
+            session=self.session,
+            actor=actor,
+            action="DAILY_EOD_WORKFLOW_FAILED",
+            entity_type="JobRun",
+            entity_id=str(job_run_id),
+            before_state=None,
+            after_state={"error_type": error_detail["error_type"]},
+        )
+        self.session.commit()
+        return job

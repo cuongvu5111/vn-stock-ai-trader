@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import require_admin, require_trader, require_viewer
 from app.core.database import get_db_session
 from app.market_data.service import MarketDataService
 from app.schemas.market_data import (
@@ -31,7 +32,7 @@ def get_market_service(session: Session = Depends(get_db_session)) -> MarketData
     return MarketDataService(session=session)
 
 
-@router.get("/stocks", response_model=StockListResponse)
+@router.get("/stocks", response_model=StockListResponse, dependencies=[Depends(require_viewer)])
 def list_stocks(
     exchange: Optional[str] = Query(default=None, description="Lọc theo sàn: HOSE, HNX, UPCOM"),
     is_active: Optional[bool] = Query(default=None, description="Lọc theo trạng thái kích hoạt"),
@@ -50,7 +51,12 @@ def list_stocks(
     )
 
 
-@router.post("/stocks", response_model=StockResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/stocks",
+    response_model=StockResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
+)
 def create_stock(
     payload: StockCreateRequest,
     service: MarketDataService = Depends(get_market_service),
@@ -59,7 +65,7 @@ def create_stock(
     return service.create_stock(payload)
 
 
-@router.patch("/stocks/{symbol}", response_model=StockResponse)
+@router.patch("/stocks/{symbol}", response_model=StockResponse, dependencies=[Depends(require_admin)])
 def update_stock(
     symbol: str,
     payload: StockUpdateRequest,
@@ -69,7 +75,11 @@ def update_stock(
     return service.update_stock(symbol=symbol, payload=payload)
 
 
-@router.get("/stocks/{symbol}/history", response_model=StockHistoryResponse)
+@router.get(
+    "/stocks/{symbol}/history",
+    response_model=StockHistoryResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_stock_history(
     symbol: str,
     start_date: Optional[date] = Query(default=None, description="Ngày bắt đầu (YYYY-MM-DD)"),
@@ -86,7 +96,11 @@ def get_stock_history(
     )
 
 
-@router.get("/market/overview", response_model=MarketOverviewResponse)
+@router.get(
+    "/market/overview",
+    response_model=MarketOverviewResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_market_overview(
     service: MarketDataService = Depends(get_market_service),
 ) -> MarketOverviewResponse:
@@ -98,6 +112,7 @@ def get_market_overview(
     "/market/imports",
     response_model=ImportBatchResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_trader)],
 )
 def create_market_import(
     payload: CsvImportRequest,
@@ -114,7 +129,11 @@ def create_market_import(
     )
 
 
-@router.get("/market/imports/{batch_id}", response_model=ImportBatchResponse)
+@router.get(
+    "/market/imports/{batch_id}",
+    response_model=ImportBatchResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_market_import_status(
     batch_id: uuid.UUID,
     service: MarketDataService = Depends(get_market_service),
@@ -123,7 +142,11 @@ def get_market_import_status(
     return service.get_import_batch(batch_id=batch_id)
 
 
-@router.post("/market/sync-real", response_model=SyncRealMarketResponse)
+@router.post(
+    "/market/sync-real",
+    response_model=SyncRealMarketResponse,
+    dependencies=[Depends(require_admin)],
+)
 def sync_real_market_data(
     payload: SyncRealMarketRequest,
     service: MarketDataService = Depends(get_market_service),

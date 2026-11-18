@@ -93,11 +93,12 @@ class RiskService:
         after_json = request.configuration.model_dump(mode="json")
 
         row.configuration = after_json
-        action_name = (
-            "KILL_SWITCH_ACTIVATED"
-            if not request.configuration.trading_enabled and before_json.get("trading_enabled", True)
-            else "RISK_CONFIG_UPDATED"
-        )
+        if not request.configuration.trading_enabled and before_json.get("trading_enabled", True):
+            action_name = "KILL_SWITCH_ACTIVATED"
+        elif request.configuration.trading_enabled and not before_json.get("trading_enabled", True):
+            action_name = "KILL_SWITCH_DEACTIVATED"
+        else:
+            action_name = "RISK_CONFIG_UPDATED"
 
         record_audit_log(
             session=self.session,
@@ -109,6 +110,31 @@ class RiskService:
             after_state={"reason": request.reason, "configuration": after_json},
         )
 
+        self.session.commit()
+        self.session.refresh(row)
+        return self.get_risk_status()
+
+    def set_kill_switch(self, active: bool, actor: str, reason: str) -> RiskStatusResponse:
+        """
+        Bật/tắt Kill Switch mà không đụng tới các hạn mức khác.
+        Idempotent: nếu trạng thái đã đúng như yêu cầu thì không ghi thêm audit.
+        """
+        row = self.get_or_create_active_config_row()
+        before_json = dict(row.configuration)
+        if (not before_json.get("trading_enabled", True)) == active:
+            return self.get_risk_status()
+
+        after_json = {**before_json, "trading_enabled": not active}
+        row.configuration = after_json
+        record_audit_log(
+            session=self.session,
+            actor=actor,
+            action="KILL_SWITCH_ACTIVATED" if active else "KILL_SWITCH_DEACTIVATED",
+            entity_type="RiskConfig",
+            entity_id=str(row.id),
+            before_state=before_json,
+            after_state={"reason": reason, "configuration": after_json},
+        )
         self.session.commit()
         self.session.refresh(row)
         return self.get_risk_status()

@@ -4,6 +4,8 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import require_trader, require_viewer
+from app.auth.models import User
 from app.core.database import get_db_session
 from app.schemas.system import (
     DailyWorkflowRunRequest,
@@ -15,7 +17,12 @@ from app.system.service import SystemWorkflowService
 router = APIRouter(prefix="/system", tags=["System & Daily Workflow"])
 
 
-@router.get("/jobs", response_model=JobRunListResponse, summary="Lịch sử các đợt chạy Job (system.job_runs)")
+@router.get(
+    "/jobs",
+    response_model=JobRunListResponse,
+    summary="Lịch sử các đợt chạy Job (system.job_runs)",
+    dependencies=[Depends(require_viewer)],
+)
 def list_job_runs(
     limit: int = Query(default=30, ge=1, le=200),
     session: Session = Depends(get_db_session),
@@ -31,7 +38,8 @@ def list_job_runs(
 )
 def run_daily_workflow(
     payload: DailyWorkflowRunRequest,
+    user: User = Depends(require_trader),
     session: Session = Depends(get_db_session),
 ) -> DailyWorkflowRunResponse:
     service = SystemWorkflowService(session=session)
-    return service.run_daily_eod_workflow(payload=payload)
+    return service.run_daily_eod_workflow(payload=payload, actor=user.username)

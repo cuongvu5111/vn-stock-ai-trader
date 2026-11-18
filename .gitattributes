@@ -1,0 +1,3 @@
+# Ngày tạo: 2026-11-17
+# Mục đích: Ép line ending LF cho file chạy trong container Linux để checkout trên Windows (autocrlf) không làm hỏng shebang.
+*.sh text eol=lf

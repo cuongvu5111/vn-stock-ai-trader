@@ -79,10 +79,11 @@ def evaluate_trade_risk_and_sizing(
 
     # ------------------------------------------------------------------
     # TRƯỜNG HỢP LỆNH BÁN (SELL)
+    # `available_position_qty_for_sell` là số lượng đã thanh toán T+N, không gồm cổ phiếu mua chưa về tài khoản.
     # ------------------------------------------------------------------
     if norm_side == "SELL":
         if available_position_qty_for_sell <= 0:
-            reasons.append("INSUFFICIENT_POSITION_FOR_SELL: Không có cổ phiếu khả dụng để bán.")
+            reasons.append("INSUFFICIENT_POSITION_FOR_SELL: Không có cổ phiếu khả dụng (đã thanh toán T+N) để bán.")
             return RiskEvaluationResult(
                 passed=False,
                 proposed_quantity=0,
@@ -95,7 +96,7 @@ def evaluate_trade_risk_and_sizing(
         sell_qty = requested_quantity if requested_quantity is not None else available_position_qty_for_sell
         if sell_qty > available_position_qty_for_sell:
             reasons.append(
-                f"SELL_QTY_EXCEEDS_AVAILABLE: Khối lượng bán ({sell_qty}) vượt số dư khả dụng ({available_position_qty_for_sell})."
+                f"SELL_QTY_EXCEEDS_AVAILABLE: Khối lượng bán ({sell_qty}) vượt số dư khả dụng đã thanh toán T+N ({available_position_qty_for_sell})."
             )
 
         gross_val = _q2(Decimal(sell_qty) * entry_price)

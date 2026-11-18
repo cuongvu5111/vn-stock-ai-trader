@@ -3,11 +3,13 @@
 # Lý do: Không dùng cascade delete đối với lịch sử lệnh/khớp lệnh; tách riêng Order và Execution để hỗ trợ partial fills.
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from sqlalchemy import (
+    CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -15,6 +17,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -62,7 +65,11 @@ class Approval(Base):
         UUID(as_uuid=True), ForeignKey("trading.trade_proposals.id", ondelete="RESTRICT"), nullable=False
     )
     decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Snapshot username tại thời điểm duyệt (giữ nguyên dù user bị đổi/khóa); user_id là liên kết tới tài khoản thật.
     approved_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    approver_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("system.users.id", ondelete="RESTRICT"), nullable=True
+    )
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     approved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -74,6 +81,8 @@ class Order(Base):
 
     __tablename__ = "orders"
     __table_args__ = (
+        # Mỗi Approval chỉ được sinh tối đa một Order (chống tạo lệnh trùng từ cùng một quyết định duyệt)
+        UniqueConstraint("approval_id"),
         Index("ix_orders_status_created_at", "status", "created_at"),
         {"schema": "trading"},
     )
@@ -81,6 +90,9 @@ class Order(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     proposal_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("trading.trade_proposals.id", ondelete="RESTRICT"), nullable=True
+    )
+    approval_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("trading.approvals.id", ondelete="RESTRICT"), nullable=False
     )
     broker_name: Mapped[str] = mapped_column(String(50), nullable=False, default="PAPER")
     broker_order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
@@ -105,7 +117,10 @@ class Execution(Base):
     """Bút toán khớp lệnh chi tiết (một Order có thể có nhiều Executions)."""
 
     __tablename__ = "executions"
-    __table_args__ = {"schema": "trading"}
+    __table_args__ = (
+        CheckConstraint("settlement_date >= trade_date", name="settlement_after_trade"),
+        {"schema": "trading"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     order_id: Mapped[uuid.UUID] = mapped_column(
@@ -119,3 +134,6 @@ class Execution(Base):
     executed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Ngày giao dịch theo múi giờ thị trường (không phải ngày UTC) và ngày cổ phiếu mua được thanh toán (T+N)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    settlement_date: Mapped[date] = mapped_column(Date, nullable=False)

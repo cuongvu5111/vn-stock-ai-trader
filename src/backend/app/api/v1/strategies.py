@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import require_trader, require_viewer
 from app.backtesting.service import BacktestService
 from app.core.database import get_db_session
 from app.schemas.strategy import (
@@ -30,7 +31,7 @@ def get_backtest_service(session: Session = Depends(get_db_session)) -> Backtest
     return BacktestService(session=session)
 
 
-@router.post("/scanner/run", response_model=ScannerRunResponse)
+@router.post("/scanner/run", response_model=ScannerRunResponse, dependencies=[Depends(require_trader)])
 def run_stock_scanner(
     payload: ScannerRunRequest,
     service: ScannerService = Depends(get_scanner_service),
@@ -39,7 +40,7 @@ def run_stock_scanner(
     return service.run_scanner(payload)
 
 
-@router.post("/signals/generate", response_model=ScannerRunResponse)
+@router.post("/signals/generate", response_model=ScannerRunResponse, dependencies=[Depends(require_trader)])
 def generate_signals(
     payload: ScannerRunRequest,
     service: ScannerService = Depends(get_scanner_service),
@@ -48,7 +49,7 @@ def generate_signals(
     return service.run_scanner(payload)
 
 
-@router.get("/signals", response_model=SignalListResponse)
+@router.get("/signals", response_model=SignalListResponse, dependencies=[Depends(require_viewer)])
 def list_signals(
     symbol: Optional[str] = Query(default=None, description="Lọc theo mã cổ phiếu"),
     action: Optional[str] = Query(default=None, description="Lọc theo BUY / SELL / HOLD"),
@@ -69,6 +70,7 @@ def list_signals(
     "/backtests",
     response_model=BacktestRunResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_trader)],
 )
 def create_backtest_run(
     payload: BacktestCreateRequest,
@@ -78,7 +80,11 @@ def create_backtest_run(
     return service.create_and_run_backtest(payload)
 
 
-@router.get("/backtests/{backtest_id}", response_model=BacktestRunResponse)
+@router.get(
+    "/backtests/{backtest_id}",
+    response_model=BacktestRunResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_backtest_result(
     backtest_id: uuid.UUID,
     service: BacktestService = Depends(get_backtest_service),

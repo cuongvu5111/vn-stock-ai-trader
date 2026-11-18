@@ -13,6 +13,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
 if BACKEND_DIR.exists() and str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app.auth.service import ensure_bootstrap_admin  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.core.database import SessionLocal  # noqa: E402
 from app.market_data.models import DataSource, Stock  # noqa: E402
@@ -174,6 +175,9 @@ def run_seed() -> None:
             )
 
         session.commit()
+
+        # 7. Seed tài khoản admin đầu tiên từ BOOTSTRAP_ADMIN_USERNAME/PASSWORD (không in secret, không ghi đè user đã có)
+        ensure_bootstrap_admin(session, settings)
         print("Seed initial data completed successfully (Idempotent, marked SAMPLE/SIMULATED).")
 
 

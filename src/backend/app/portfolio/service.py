@@ -5,13 +5,15 @@
 #   - Hỗ trợ tái dựng (rebuild) lại toàn bộ positions và cash_balance từ ledger & executions.
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core import clock
 from app.core.config import get_settings
 from app.market_data.models import DailyPrice, Stock
 from app.portfolio.models import Account, CashTransaction, DailySnapshot, Position
@@ -26,10 +28,12 @@ from app.schemas.trading import (
     ReconciliationReportResponse,
 )
 from app.trading.models import Execution, Order
+from app.trading.settlement import LedgerFill, settled_available_quantity
 
 Q_MONEY_2 = Decimal("0.01")
 Q_PRICE_4 = Decimal("0.0001")
 HUNDRED = Decimal("100")
+DEFAULT_PAPER_ACCOUNT_NAME = "DEFAULT_PAPER_ACCOUNT"
 ZERO = Decimal("0.00")
 
 
@@ -48,15 +52,39 @@ class PortfolioService:
         self.session = session
         self.settings = get_settings()
 
-    def get_or_create_default_paper_account(self) -> Account:
-        """Lấy hoặc khởi tạo tài khoản Paper mặc định kèm bút toán vốn ban đầu."""
-        account = self.session.scalar(
-            select(Account).where(Account.account_name == "DEFAULT_PAPER_ACCOUNT")
-        )
+    def get_or_create_default_paper_account(self, for_update: bool = False) -> Account:
+        """
+        Lấy hoặc khởi tạo tài khoản Paper mặc định kèm bút toán vốn ban đầu.
+
+        `for_update=True` khóa dòng Account (`SELECT ... FOR UPDATE`) cho tới hết transaction hiện tại và đọc lại
+        `cash_balance` mới nhất (`populate_existing`, kể cả khi Account đã nằm sẵn trong identity map): mọi đường
+        đọc-kiểm tra-ghi số dư tiền phải gọi bằng cờ này để hai lần khớp song song không ghi đè (lost update) hay cùng
+        tiêu một khoản tiền. Thứ tự khóa toàn hệ thống là Order -> Stock -> Account; không giữ khóa Account rồi mới
+        xin khóa Order/Stock. Đường chỉ đọc (mặc định) không khóa.
+        """
+        stmt = select(Account).where(Account.account_name == DEFAULT_PAPER_ACCOUNT_NAME)
+        if for_update:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+        account = self.session.scalar(stmt)
         if account is None:
-            init_cap = _q2(Decimal(str(self.settings.INITIAL_PAPER_CAPITAL)))
+            try:
+                self._create_default_paper_account()
+            except IntegrityError:
+                # Thua worker khác (UNIQUE account_name): savepoint đã rollback, transaction ngoài vẫn dùng tiếp.
+                # Nếu vẫn không thấy tài khoản thì lỗi không phải do tranh tạo nên phải ném lại.
+                account = self.session.scalar(stmt)
+                if account is None:
+                    raise
+                return account
+            account = self.session.scalar(stmt)
+        return account
+
+    def _create_default_paper_account(self) -> None:
+        """Tạo tài khoản mặc định cùng bút toán vốn ban đầu trong một savepoint (lỗi UNIQUE chỉ rollback savepoint)."""
+        init_cap = _q2(Decimal(str(self.settings.INITIAL_PAPER_CAPITAL)))
+        with self.session.begin_nested():
             account = Account(
-                account_name="DEFAULT_PAPER_ACCOUNT",
+                account_name=DEFAULT_PAPER_ACCOUNT_NAME,
                 initial_capital=init_cap,
                 cash_balance=init_cap,
                 currency="VND",
@@ -76,8 +104,6 @@ class PortfolioService:
                 )
             )
             self.session.flush()
-        return account
-
     def get_latest_market_price(self, stock_id: uuid.UUID, fallback_price: Decimal) -> Decimal:
         """Lấy giá đóng cửa gần nhất của mã cổ phiếu từ `market.daily_prices`."""
         latest_close = self.session.scalar(
@@ -88,6 +114,57 @@ class PortfolioService:
         )
         return _q4(latest_close) if latest_close is not None else _q4(fallback_price)
 
+    def _load_ledger_fills(self, symbol: Optional[str] = None) -> Dict[str, List[LedgerFill]]:
+        """Đọc sổ khớp lệnh (`trading.executions`) gom theo mã; đây là nguồn sự thật cho số lượng khả dụng T+N."""
+        stmt = select(
+            Order.symbol, Order.side, Execution.quantity, Execution.settlement_date
+        ).join(Order, Execution.order_id == Order.id)
+        if symbol is not None:
+            stmt = stmt.where(Order.symbol == symbol)
+        fills: Dict[str, List[LedgerFill]] = {}
+        for sym, side, quantity, settlement_date in self.session.execute(stmt).all():
+            fills.setdefault(sym, []).append(
+                LedgerFill(side=side, quantity=quantity, settlement_date=settlement_date)
+            )
+        return fills
+
+    def get_settled_available_quantity(self, symbol: str, as_of: Optional[date] = None) -> int:
+        """Số cổ phiếu `symbol` được phép bán tại ngày thị trường `as_of` (mặc định hôm nay): BUY đã thanh toán - SELL."""
+        as_of_date = as_of or clock.market_today()
+        fills = self._load_ledger_fills(symbol).get(symbol, [])
+        return settled_available_quantity(fills, as_of_date)
+
+    def refresh_available_quantities(self, as_of: Optional[date] = None) -> None:
+        """
+        Cập nhật cột cache `Position.available_quantity` từ sổ khớp lệnh theo ngày thị trường `as_of`.
+        Chỉ ghi đè số suy dẫn trên bảng positions, tuyệt đối không sửa executions/cash_transactions.
+        """
+        as_of_date = as_of or clock.market_today()
+        account = self.get_or_create_default_paper_account()
+        fills_by_symbol = self._load_ledger_fills()
+        rows = self.session.execute(
+            select(Position, Stock)
+            .join(Stock, Position.stock_id == Stock.id)
+            .where(Position.account_id == account.id)
+        ).all()
+        for pos, stock in rows:
+            ledger_available = settled_available_quantity(fills_by_symbol.get(stock.symbol, []), as_of_date)
+            pos.available_quantity = min(pos.quantity, ledger_available)
+        self.session.flush()
+
+    def lock_symbol_for_update(self, symbol: str) -> None:
+        """
+        Khóa dòng `market.stocks` của mã (`SELECT ... FOR UPDATE`) cho tới hết transaction hiện tại để mọi lần khớp
+        cùng một mã (kể cả từ nhiều worker/process) chạy tuần tự: khối lượng khả dụng T+N và vị thế chỉ được tính
+        lại SAU khi giành được khóa, nên hai lệnh SELL song song không thể cùng bán số cổ phiếu đã thanh toán.
+        Mã chưa có dòng Stock thì không có gì để khóa; khi đó chưa từng có lần khớp nào của mã (Stock được tạo
+        cùng transaction với Execution đầu tiên) nên SELL luôn bị chặn vì khả dụng = 0, còn BUY lần đầu được
+        UNIQUE(symbol) bảo vệ (bên thua nhận lỗi thay vì ghi sai sổ). SQLite (test) bỏ qua FOR UPDATE.
+        """
+        self.session.execute(
+            select(Stock.id).where(Stock.symbol == symbol).with_for_update()
+        ).first()
+
     def apply_execution_to_ledger_and_positions(
         self,
         order: Order,
@@ -96,8 +173,11 @@ class PortfolioService:
         """
         Cập nhật đồng bộ Sổ cái tiền mặt (`cash_transactions`), số dư `Account.cash_balance`
         và vị thế `Position` ngay trong cùng transaction khi phát sinh một `Execution`.
+        BUY tăng `quantity` nhưng `available_quantity` chỉ tăng khi tới `execution.settlement_date` (T+N).
+        Số dư tiền được đọc lại dưới khóa Account (`FOR UPDATE`, giữ tới commit) trước khi cộng/trừ, nên hai lần khớp
+        song song (kể cả khác mã) không ghi đè nhau. Gọi sau khi đã khóa Order -> Stock để giữ đúng thứ tự khóa.
         """
-        account = self.get_or_create_default_paper_account()
+        account = self.get_or_create_default_paper_account(for_update=True)
         stock = self.session.scalar(select(Stock).where(Stock.symbol == order.symbol))
         if stock is None:
             stock = Stock(
@@ -144,20 +224,19 @@ class PortfolioService:
                         account_id=account.id,
                         stock_id=stock.id,
                         quantity=new_qty,
-                        available_quantity=new_qty,
+                        available_quantity=0,
                         average_cost=new_avg_cost,
                     )
                     self.session.add(position)
                 else:
                     position.quantity = new_qty
-                    position.available_quantity = new_qty
+                    position.available_quantity = 0
                     position.average_cost = new_avg_cost
             else:
                 old_total_cost = Decimal(position.quantity) * position.average_cost
                 new_qty = position.quantity + execution.quantity
                 position.average_cost = _q4((old_total_cost + total_outflow) / Decimal(new_qty))
                 position.quantity = new_qty
-                position.available_quantity = position.available_quantity + execution.quantity
 
         elif order.side == "SELL":
             net_inflow = _q2(gross_amount - execution.fee - execution.tax)
@@ -180,15 +259,26 @@ class PortfolioService:
             if position is not None:
                 remaining_qty = max(0, position.quantity - execution.quantity)
                 position.quantity = remaining_qty
-                position.available_quantity = max(0, position.available_quantity - execution.quantity)
                 if remaining_qty == 0:
                     position.average_cost = Decimal("0.0000")
 
         self.session.flush()
 
-    def get_portfolio_overview(self) -> PortfolioOverviewResponse:
-        """Tính toán tổng quan danh mục (Cash, Market Value, NAV, P&L, tỷ trọng từng vị thế)."""
+        if position is not None:
+            position.available_quantity = min(
+                position.quantity,
+                self.get_settled_available_quantity(order.symbol, as_of=execution.trade_date),
+            )
+            self.session.flush()
+
+    def get_portfolio_overview(self, as_of: Optional[date] = None) -> PortfolioOverviewResponse:
+        """
+        Tính toán tổng quan danh mục (Cash, Market Value, NAV, P&L, tỷ trọng từng vị thế).
+        `available_quantity` luôn được làm mới từ sổ khớp lệnh theo ngày thị trường `as_of` (mặc định hôm nay).
+        """
+        as_of_date = as_of or clock.market_today()
         account = self.get_or_create_default_paper_account()
+        self.refresh_available_quantities(as_of=as_of_date)
         pos_rows = self.session.execute(
             select(Position, Stock)
             .join(Stock, Position.stock_id == Stock.id)
@@ -224,6 +314,7 @@ class PortfolioService:
                     exchange=stock.exchange,
                     quantity=pos.quantity,
                     available_quantity=pos.available_quantity,
+                    pending_settlement_quantity=pos.quantity - pos.available_quantity,
                     average_cost=pos.average_cost,
                     market_price=mkt_price,
                     market_value=mkt_val,
@@ -233,6 +324,7 @@ class PortfolioService:
             )
 
         return PortfolioOverviewResponse(
+            as_of_date=as_of_date,
             account_id=account.id,
             account_name=account.account_name,
             account_type=account.account_type,
@@ -250,7 +342,8 @@ class PortfolioService:
 
     def create_or_update_daily_snapshot(self, snapshot_date: date | None = None) -> DailySnapshotItemResponse:
         """Chốt bản chụp NAV cuối ngày vào `portfolio.daily_snapshots`."""
-        target_date = snapshot_date or datetime.now(timezone.utc).date()
+        # Ngày chốt NAV theo lịch thị trường: 23:30 UTC đã là ngày hôm sau ở Việt Nam
+        target_date = snapshot_date or clock.market_today()
         overview = self.get_portfolio_overview()
 
         snap = self.session.scalar(
@@ -308,12 +401,18 @@ class PortfolioService:
             items=[CashTransactionItemResponse.model_validate(r) for r in rows],
         )
 
-    def reconcile_and_rebuild_portfolio(self, actor: str = "system_reconciler") -> ReconciliationReportResponse:
+    def reconcile_and_rebuild_portfolio(
+        self, actor: str = "system_reconciler", as_of: Optional[date] = None
+    ) -> ReconciliationReportResponse:
         """
         Đối soát và tái dựng (rebuild) lại toàn bộ `cash_balance` và `positions` từ
         dữ liệu gốc bất biến (`portfolio.cash_transactions` và `trading.executions`).
+        `available_quantity` được dựng lại theo T+N tại ngày thị trường `as_of` (BUY đã thanh toán - SELL),
+        không mặc định bằng tổng số lượng.
         """
-        account = self.get_or_create_default_paper_account()
+        as_of_date = as_of or clock.market_today()
+        # Ghi lại cash_balance và xóa/dựng lại positions nên phải khóa Account để không đè lên lần khớp đang chạy
+        account = self.get_or_create_default_paper_account(for_update=True)
         prev_cash = _q2(account.cash_balance)
         discrepancies: List[str] = []
 
@@ -340,8 +439,12 @@ class PortfolioService:
 
         # symbol -> (qty, avg_cost)
         rebuilt_positions: Dict[str, tuple[int, Decimal]] = {}
+        fills_by_symbol: Dict[str, List[LedgerFill]] = {}
         for ex, ord_row in exec_rows:
             sym = ord_row.symbol
+            fills_by_symbol.setdefault(sym, []).append(
+                LedgerFill(side=ord_row.side, quantity=ex.quantity, settlement_date=ex.settlement_date)
+            )
             cur_qty, cur_avg = rebuilt_positions.get(sym, (0, Decimal("0.0000")))
             gross = _q2(Decimal(ex.quantity) * ex.price)
             if ord_row.side == "BUY":
@@ -388,7 +491,9 @@ class PortfolioService:
                     account_id=account.id,
                     stock_id=stock.id,
                     quantity=expected_qty,
-                    available_quantity=expected_qty,
+                    available_quantity=min(
+                        expected_qty, settled_available_quantity(fills_by_symbol.get(sym, []), as_of_date)
+                    ),
                     average_cost=expected_avg,
                 )
             )
@@ -404,6 +509,7 @@ class PortfolioService:
             before_state={"cash_balance": str(prev_cash)},
             after_state={
                 "rebuilt_cash_balance": str(rebuilt_cash),
+                "settlement_as_of_date": as_of_date.isoformat(),
                 "is_consistent_before_rebuild": is_consistent,
                 "discrepancies": discrepancies,
             },
@@ -417,5 +523,6 @@ class PortfolioService:
             rebuilt_cash_balance=rebuilt_cash,
             discrepancies=discrepancies,
             positions_rebuilt_count=rebuilt_count,
-            reconciled_at=datetime.now(timezone.utc),
+            reconciled_at=clock.utc_now(),
+            as_of_date=as_of_date,
         )

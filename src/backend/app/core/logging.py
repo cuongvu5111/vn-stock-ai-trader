@@ -36,6 +36,8 @@ def configure_logging(log_level: str = "INFO") -> None:
     """Thiết lập structlog xuất JSON chuẩn cho môi trường vận hành."""
     level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level)
+    # APScheduler ghi log INFO dạng văn bản thường (lẫn vào luồng JSON); chỉ giữ cảnh báo/lỗi, sự kiện lịch đã có log có cấu trúc riêng.
+    logging.getLogger("apscheduler").setLevel(max(level, logging.WARNING))
 
     structlog.configure(
         processors=[
@@ -43,6 +45,7 @@ def configure_logging(log_level: str = "INFO") -> None:
             inject_correlation_id,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),

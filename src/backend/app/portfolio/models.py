@@ -29,7 +29,11 @@ class Account(Base):
     """Tài khoản giao dịch giả lập (Paper Account)."""
 
     __tablename__ = "accounts"
-    __table_args__ = {"schema": "portfolio"}
+    # UNIQUE account_name bảo đảm chỉ có một DEFAULT_PAPER_ACCOUNT để mọi lần khớp khóa đúng một dòng Account
+    __table_args__ = (
+        UniqueConstraint("account_name", name="uq_accounts_account_name"),
+        {"schema": "portfolio"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     account_name: Mapped[str] = mapped_column(String(100), nullable=False)

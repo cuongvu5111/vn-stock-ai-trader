@@ -29,7 +29,7 @@
 - **Frontend (`src/frontend/trading-dashboard/`):**
   - Framework: Angular (Standalone Components, TypeScript, SCSS)
 - **Hạ tầng (`docker-compose.yml`):**
-  - 3 containers chính: `postgres`, `trading-backend`, `trading-frontend`.
+  - 3 containers chính: `postgres`, `trading-backend`, `trading-frontend` (+ `postgres-backup` tùy chọn, profile `backup`). Chạy local/LAN, không Kubernetes; chỉ frontend có thể bind LAN (`FRONTEND_BIND_ADDRESS`), thiếu `DB_PASSWORD`/`JWT_SECRET_KEY`/`BOOTSTRAP_ADMIN_PASSWORD` thì compose dừng ngay. Xem `README.md` mục 3.
 
 ---
 
@@ -48,8 +48,8 @@
 ## 4. Các lệnh thường dùng
 
 ```bash
-# 1. Khởi chạy toàn bộ hệ thống bằng Docker Compose
-docker compose up -d --build
+# 1. Khởi chạy toàn bộ hệ thống bằng Docker Compose (cần DB_PASSWORD, JWT_SECRET_KEY, BOOTSTRAP_ADMIN_PASSWORD trong .env)
+docker compose up -d --build --wait
 
 # 2. Chạy Alembic migration (từ thư mục src/backend)
 alembic upgrade head

@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import require_trader, require_viewer
 from app.core.database import get_db_session
 from app.indicators.service import IndicatorService
 from app.schemas.indicators import (
@@ -23,7 +24,11 @@ def get_indicator_service(session: Session = Depends(get_db_session)) -> Indicat
     return IndicatorService(session=session)
 
 
-@router.post("/indicators/calculate", response_model=IndicatorCalculationRunResponse)
+@router.post(
+    "/indicators/calculate",
+    response_model=IndicatorCalculationRunResponse,
+    dependencies=[Depends(require_trader)],
+)
 def calculate_indicators(
     payload: CalculateIndicatorsRequest,
     service: IndicatorService = Depends(get_indicator_service),
@@ -36,7 +41,11 @@ def calculate_indicators(
     )
 
 
-@router.get("/stocks/{symbol}/indicators", response_model=StockIndicatorHistoryResponse)
+@router.get(
+    "/stocks/{symbol}/indicators",
+    response_model=StockIndicatorHistoryResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_stock_indicators(
     symbol: str,
     start_date: Optional[date] = Query(default=None, description="Ngày bắt đầu (YYYY-MM-DD)"),

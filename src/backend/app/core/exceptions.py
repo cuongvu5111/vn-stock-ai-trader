@@ -4,6 +4,7 @@
 import structlog
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from app.core.logging import get_correlation_id
@@ -16,15 +17,22 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+        if isinstance(exc.detail, dict):
+            error_code = str(exc.detail.get("code") or f"HTTP_{exc.status_code}")
+            error_message = str(exc.detail.get("message") or "Yêu cầu không thể được xử lý.")
+        else:
+            error_code = f"HTTP_{exc.status_code}"
+            error_message = str(exc.detail)
         return JSONResponse(
             status_code=exc.status_code,
             content={
                 "error": {
-                    "code": f"HTTP_{exc.status_code}",
-                    "message": str(exc.detail),
+                    "code": error_code,
+                    "message": error_message,
                     "correlation_id": get_correlation_id(),
                 }
             },
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -35,7 +43,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "error": {
                     "code": "VALIDATION_ERROR",
                     "message": "Dữ liệu đầu vào không hợp lệ.",
-                    "details": exc.errors(),
+                    "details": jsonable_encoder(exc.errors()),
                     "correlation_id": get_correlation_id(),
                 }
             },

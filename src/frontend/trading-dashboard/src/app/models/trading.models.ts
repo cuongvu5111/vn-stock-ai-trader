@@ -242,11 +242,14 @@ export interface ExecutionItem {
   fee: string;
   tax: string;
   executed_at: string;
+  trade_date: string;
+  settlement_date: string;
 }
 
 export interface OrderItem {
   id: string;
   proposal_id: string | null;
+  approval_id: string;
   broker_name: string;
   broker_order_id: string | null;
   client_order_id: string;
@@ -273,6 +276,7 @@ export interface PositionItem {
   exchange: string;
   quantity: number;
   available_quantity: number;
+  pending_settlement_quantity: number;
   average_cost: string;
   market_price: string;
   market_value: string;
@@ -281,6 +285,7 @@ export interface PositionItem {
 }
 
 export interface PortfolioOverviewResponse {
+  as_of_date: string;
   account_id: string;
   account_name: string;
   account_type: string;

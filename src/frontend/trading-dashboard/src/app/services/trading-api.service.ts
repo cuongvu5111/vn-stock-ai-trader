@@ -225,7 +225,6 @@ export class TradingApiService {
   approveProposal(
     proposalId: string,
     payload: {
-      approved_by: string;
       comment?: string;
       expected_quantity: number;
       expected_limit_price?: string | null;
@@ -241,7 +240,7 @@ export class TradingApiService {
 
   rejectProposal(
     proposalId: string,
-    payload: { rejected_by: string; comment?: string }
+    payload: { comment?: string }
   ): Observable<TradeProposalItem> {
     return this.http.post<TradeProposalItem>(
       `${this.baseUrl}/proposals/${encodeURIComponent(proposalId)}/reject`,
@@ -267,11 +266,10 @@ export class TradingApiService {
     );
   }
 
-  cancelOrder(orderId: string, actor = 'trader_user'): Observable<OrderItem> {
+  cancelOrder(orderId: string): Observable<OrderItem> {
     return this.http.post<OrderItem>(
       `${this.baseUrl}/orders/${encodeURIComponent(orderId)}/cancel`,
-      null,
-      { params: new HttpParams().set('actor', actor) }
+      null
     );
   }
 
@@ -298,11 +296,10 @@ export class TradingApiService {
     });
   }
 
-  reconcilePortfolio(actor = 'trader_user'): Observable<ReconciliationReportResponse> {
+  reconcilePortfolio(): Observable<ReconciliationReportResponse> {
     return this.http.post<ReconciliationReportResponse>(
       `${this.baseUrl}/portfolio/reconcile`,
-      null,
-      { params: new HttpParams().set('actor', actor) }
+      null
     );
   }
 
@@ -314,10 +311,17 @@ export class TradingApiService {
   }
 
   updateRiskConfig(payload: {
-    actor: string;
     reason: string;
     configuration: RiskConfigPayload;
   }): Observable<RiskStatusResponse> {
     return this.http.put<RiskStatusResponse>(`${this.baseUrl}/risk`, payload);
+  }
+
+  activateKillSwitch(reason: string): Observable<RiskStatusResponse> {
+    return this.http.post<RiskStatusResponse>(`${this.baseUrl}/risk/kill-switch/activate`, { reason });
+  }
+
+  deactivateKillSwitch(reason: string): Observable<RiskStatusResponse> {
+    return this.http.post<RiskStatusResponse>(`${this.baseUrl}/risk/kill-switch/deactivate`, { reason });
   }
 }

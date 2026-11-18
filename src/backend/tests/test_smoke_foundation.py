@@ -34,8 +34,8 @@ def test_health_endpoint_returns_expected_contract(monkeypatch) -> None:
     assert set(payload["registered_schemas"]) == set(POSTGRES_SCHEMAS)
 
 
-def test_all_six_schemas_and_twenty_four_tables_registered() -> None:
-    """Đảm bảo toàn bộ 6 schemas và 24 bảng theo đặc tả Mục 6 đã được đăng ký trong SQLAlchemy metadata."""
+def test_all_six_schemas_and_twenty_five_tables_registered() -> None:
+    """Đảm bảo toàn bộ 6 schemas và 25 bảng (24 bảng đặc tả Mục 6 + system.users) đã được đăng ký trong SQLAlchemy metadata."""
     tables = Base.metadata.tables
     discovered_schemas = {table.schema for table in tables.values()}
 
@@ -74,11 +74,12 @@ def test_all_six_schemas_and_twenty_four_tables_registered() -> None:
         "portfolio.positions",
         "portfolio.cash_transactions",
         "portfolio.daily_snapshots",
-        # system (4)
+        # system (5)
         "system.risk_configs",
         "system.job_runs",
         "system.audit_logs",
         "system.app_settings",
+        "system.users",
     }
 
     assert set(tables.keys()) == expected_tables

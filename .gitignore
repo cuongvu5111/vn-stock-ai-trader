@@ -37,8 +37,8 @@ logs/
 data/
 pgdata/
 postgres-data/
-backups/*.sql
-backups/*.dump
+backups/*
+!backups/.gitkeep
 
 # IDE & OS
 .vscode/

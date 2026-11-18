@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.ai.service import AiAnalysisService
+from app.auth.dependencies import require_trader, require_viewer
 from app.core.database import get_db_session
 from app.schemas.ai import AiAnalyzeRequest, AiReportListResponse, AiReportResponse
 
@@ -18,7 +19,7 @@ def get_ai_service(session: Session = Depends(get_db_session)) -> AiAnalysisServ
     return AiAnalysisService(session=session)
 
 
-@router.post("/ai/analyze", response_model=AiReportResponse)
+@router.post("/ai/analyze", response_model=AiReportResponse, dependencies=[Depends(require_trader)])
 def analyze_signal_with_ai(
     payload: AiAnalyzeRequest,
     service: AiAnalysisService = Depends(get_ai_service),
@@ -27,7 +28,7 @@ def analyze_signal_with_ai(
     return service.analyze_and_persist(payload)
 
 
-@router.get("/ai/reports", response_model=AiReportListResponse)
+@router.get("/ai/reports", response_model=AiReportListResponse, dependencies=[Depends(require_viewer)])
 def list_ai_reports(
     symbol: Optional[str] = Query(default=None, description="Lọc theo mã cổ phiếu"),
     signal_id: Optional[uuid.UUID] = Query(default=None, description="Lọc theo ID tín hiệu"),
@@ -44,7 +45,11 @@ def list_ai_reports(
     )
 
 
-@router.get("/ai/reports/{report_id}", response_model=AiReportResponse)
+@router.get(
+    "/ai/reports/{report_id}",
+    response_model=AiReportResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_ai_report_detail(
     report_id: uuid.UUID,
     service: AiAnalysisService = Depends(get_ai_service),

@@ -8,12 +8,15 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import require_admin, require_trader, require_viewer
+from app.auth.models import User
 from app.core.database import get_db_session
 from app.portfolio.service import PortfolioService
 from app.risk.service import RiskService
 from app.schemas.trading import (
     CashLedgerListResponse,
     DailySnapshotItemResponse,
+    KillSwitchRequest,
     OrderListResponse,
     OrderResponse,
     PortfolioOverviewResponse,
@@ -34,31 +37,75 @@ from app.trading.service import TradingWorkflowService
 router = APIRouter(tags=["Risk, Trading & Portfolio"])
 
 
-@router.get("/risk", response_model=RiskStatusResponse, summary="Lấy trạng thái cấu hình rủi ro và Kill Switch")
+@router.get(
+    "/risk",
+    response_model=RiskStatusResponse,
+    summary="Lấy trạng thái cấu hình rủi ro và Kill Switch",
+    dependencies=[Depends(require_viewer)],
+)
 def get_risk_status(session: Session = Depends(get_db_session)) -> RiskStatusResponse:
     service = RiskService(session=session)
     return service.get_risk_status()
 
 
-@router.put("/risk", response_model=RiskStatusResponse, summary="Cập nhật cấu hình rủi ro hoặc kích hoạt Kill Switch")
+@router.put(
+    "/risk",
+    response_model=RiskStatusResponse,
+    summary="Cập nhật hạn mức rủi ro / Kill Switch (chỉ admin)",
+)
 def update_risk_config(
     payload: RiskConfigUpdateRequest,
+    user: User = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> RiskStatusResponse:
     service = RiskService(session=session)
-    return service.update_risk_config(request=payload)
+    return service.update_risk_config(request=payload.model_copy(update={"actor": user.username}))
+
+
+@router.post(
+    "/risk/kill-switch/activate",
+    response_model=RiskStatusResponse,
+    summary="BẬT Kill Switch khẩn cấp (trader hoặc admin) - chặn toàn bộ lệnh mới",
+)
+def activate_kill_switch(
+    payload: KillSwitchRequest,
+    user: User = Depends(require_trader),
+    session: Session = Depends(get_db_session),
+) -> RiskStatusResponse:
+    service = RiskService(session=session)
+    return service.set_kill_switch(active=True, actor=user.username, reason=payload.reason)
+
+
+@router.post(
+    "/risk/kill-switch/deactivate",
+    response_model=RiskStatusResponse,
+    summary="TẮT Kill Switch (chỉ admin)",
+)
+def deactivate_kill_switch(
+    payload: KillSwitchRequest,
+    user: User = Depends(require_admin),
+    session: Session = Depends(get_db_session),
+) -> RiskStatusResponse:
+    service = RiskService(session=session)
+    return service.set_kill_switch(active=False, actor=user.username, reason=payload.reason)
 
 
 @router.post("/proposals", response_model=TradeProposalResponse, summary="Tạo TradeProposal từ một tín hiệu")
 def create_proposal(
     payload: ProposalCreateRequest,
+    user: User = Depends(require_trader),
     session: Session = Depends(get_db_session),
 ) -> TradeProposalResponse:
     service = TradingWorkflowService(session=session)
-    return service.create_proposal_from_signal(payload=payload)
+    return service.create_proposal_from_signal(payload=payload, actor=user.username)
 
 
-@router.get("/proposals", response_model=ProposalListResponse, summary="Danh sách các đề xuất giao dịch (TradeProposals)")
+@router.get(
+    "/proposals",
+    response_model=ProposalListResponse,
+    summary="Danh sách các đề xuất giao dịch (TradeProposals)",
+    dependencies=[Depends(require_viewer)],
+)
 def list_proposals(
     status: Optional[str] = Query(default=None, description="Lọc theo trạng thái (PendingApproval, Submitted, Blocked, ...)"),
     limit: int = Query(default=100, ge=1, le=500),
@@ -76,10 +123,15 @@ def list_proposals(
 def approve_proposal(
     proposal_id: uuid.UUID,
     payload: ProposalApproveRequest,
+    user: User = Depends(require_trader),
     session: Session = Depends(get_db_session),
 ) -> TradeProposalResponse:
     service = TradingWorkflowService(session=session)
-    return service.approve_proposal(proposal_id=proposal_id, payload=payload)
+    # Không tin approved_by từ client: người duyệt luôn là user trong JWT (lưu cả username snapshot lẫn user id)
+    trusted_payload = payload.model_copy(update={"approved_by": user.username})
+    return service.approve_proposal(
+        proposal_id=proposal_id, payload=trusted_payload, approver_user_id=user.id
+    )
 
 
 @router.post(
@@ -90,13 +142,22 @@ def approve_proposal(
 def reject_proposal(
     proposal_id: uuid.UUID,
     payload: ProposalRejectRequest,
+    user: User = Depends(require_trader),
     session: Session = Depends(get_db_session),
 ) -> TradeProposalResponse:
     service = TradingWorkflowService(session=session)
-    return service.reject_proposal(proposal_id=proposal_id, payload=payload)
+    trusted_payload = payload.model_copy(update={"rejected_by": user.username})
+    return service.reject_proposal(
+        proposal_id=proposal_id, payload=trusted_payload, approver_user_id=user.id
+    )
 
 
-@router.get("/orders", response_model=OrderListResponse, summary="Danh sách các lệnh Paper kèm chi tiết khớp lệnh")
+@router.get(
+    "/orders",
+    response_model=OrderListResponse,
+    summary="Danh sách các lệnh Paper kèm chi tiết khớp lệnh",
+    dependencies=[Depends(require_viewer)],
+)
 def list_orders(
     status: Optional[str] = Query(default=None, description="Lọc theo trạng thái (Submitted, PartiallyFilled, Filled, Cancelled)"),
     limit: int = Query(default=100, ge=1, le=500),
@@ -114,10 +175,11 @@ def list_orders(
 def simulate_order_fill(
     order_id: uuid.UUID,
     payload: SimulateFillRequest,
+    user: User = Depends(require_trader),
     session: Session = Depends(get_db_session),
 ) -> OrderResponse:
     broker = PaperBrokerAdapter(session=session)
-    return broker.execute_fill(order_id=order_id, payload=payload)
+    return broker.execute_fill(order_id=order_id, payload=payload, actor=user.username)
 
 
 @router.post(
@@ -127,14 +189,19 @@ def simulate_order_fill(
 )
 def cancel_order(
     order_id: uuid.UUID,
-    actor: str = Query(default="trader_user"),
+    user: User = Depends(require_trader),
     session: Session = Depends(get_db_session),
 ) -> OrderResponse:
     broker = PaperBrokerAdapter(session=session)
-    return broker.cancel_order(order_id=order_id, actor=actor)
+    return broker.cancel_order(order_id=order_id, actor=user.username)
 
 
-@router.get("/portfolio", response_model=PortfolioOverviewResponse, summary="Tổng quan danh mục đầu tư Paper Trading")
+@router.get(
+    "/portfolio",
+    response_model=PortfolioOverviewResponse,
+    summary="Tổng quan danh mục đầu tư Paper Trading",
+    dependencies=[Depends(require_viewer)],
+)
 def get_portfolio_overview(session: Session = Depends(get_db_session)) -> PortfolioOverviewResponse:
     service = PortfolioService(session=session)
     return service.get_portfolio_overview()
@@ -144,6 +211,7 @@ def get_portfolio_overview(session: Session = Depends(get_db_session)) -> Portfo
     "/portfolio/snapshots",
     response_model=PortfolioSnapshotsResponse,
     summary="Lịch sử bản chụp NAV cuối ngày (Daily Snapshots)",
+    dependencies=[Depends(require_viewer)],
 )
 def list_portfolio_snapshots(
     limit: int = Query(default=90, ge=1, le=365),
@@ -157,6 +225,7 @@ def list_portfolio_snapshots(
     "/portfolio/snapshots",
     response_model=DailySnapshotItemResponse,
     summary="Chốt bản chụp NAV cuối ngày hiện tại",
+    dependencies=[Depends(require_trader)],
 )
 def create_portfolio_snapshot(
     snapshot_date: Optional[date] = Query(default=None),
@@ -172,17 +241,18 @@ def create_portfolio_snapshot(
     summary="Đối soát và tái dựng toàn bộ Cash Balance & Positions từ sổ cái gốc (CashTransactions & Executions)",
 )
 def reconcile_portfolio(
-    actor: str = Query(default="trader_user"),
+    user: User = Depends(require_trader),
     session: Session = Depends(get_db_session),
 ) -> ReconciliationReportResponse:
     service = PortfolioService(session=session)
-    return service.reconcile_and_rebuild_portfolio(actor=actor)
+    return service.reconcile_and_rebuild_portfolio(actor=user.username)
 
 
 @router.get(
     "/portfolio/ledger",
     response_model=CashLedgerListResponse,
     summary="Lịch sử bút toán sổ cái tiền mặt (portfolio.cash_transactions)",
+    dependencies=[Depends(require_viewer)],
 )
 def list_portfolio_ledger(
     limit: int = Query(default=100, ge=1, le=500),
